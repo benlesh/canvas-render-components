@@ -20,902 +20,1005 @@
  * IN THE SOFTWARE.
  */
 
-export type CanvasMouseEventHandler = (e: MouseEvent) => void;
+export interface CompEl<P = any> {
+	type: CompFn<P>;
+	props: P;
+}
 
-export type CanvasCompRenderer = (
+export type CompFn<P> = (
+	props: P,
 	ctx: CanvasRenderingContext2D,
-	eventRegistry: EventRegistry,
-	parentId: string,
-) => void;
+) => CompEl[] | CompEl | void;
 
-export interface CanvasMouseEventConfig {
+interface CompRefs<P> {
 	id: string;
-	include?: 'stroke' | 'fill' | 'all';
-	lineWidth?: number;
+	element: CompEl<P>;
+	refs: any[];
 }
 
-export interface EventRegistry {
-	onClick: (
-		path: Path2D,
-		handler: CanvasMouseEventHandler,
-		config: CanvasMouseEventConfig,
-	) => void;
-	onDblClick: (
-		path: Path2D,
-		handler: CanvasMouseEventHandler,
-		config: CanvasMouseEventConfig,
-	) => void;
-	onContextMenu: (
-		path: Path2D,
-		handler: CanvasMouseEventHandler,
-		config: CanvasMouseEventConfig,
-	) => void;
-	onMouseOver: (
-		path: Path2D,
-		handler: CanvasMouseEventHandler,
-		config: CanvasMouseEventConfig,
-	) => void;
-	onMouseOut: (
-		path: Path2D,
-		handler: CanvasMouseEventHandler,
-		config: CanvasMouseEventConfig,
-	) => void;
-	onMouseMove: (
-		path: Path2D,
-		handler: CanvasMouseEventHandler,
-		config: CanvasMouseEventConfig,
-	) => void;
+let refsStore = new WeakMap<HTMLCanvasElement, Map<string, CompRefs<any>>>();
+let roots = new WeakMap<HTMLCanvasElement, CompEl<any>>();
+let renderIds = new WeakMap<HTMLCanvasElement, number>();
+
+let _currentRefs: Map<string, CompRefs<any>> | undefined = undefined;
+let _currentRefsEntry: CompRefs<any> | undefined = undefined;
+let _currentCanvas: HTMLCanvasElement | undefined = undefined;
+let _currentIsMounting = false;
+let _currentHookIndex = 0;
+let _currentRenderContext: CanvasRenderingContext2D | undefined = undefined;
+let _unseenIds: Set<string> | undefined = undefined;
+
+/**
+ * Useful for testing and HMR.
+ * DO NOT USE IN PROD
+ */
+export function clearSharedState() {
+	refsStore = new WeakMap<HTMLCanvasElement, Map<string, CompRefs<any>>>();
+	roots = new WeakMap<HTMLCanvasElement, CompEl<any>>();
+	renderIds = new WeakMap<HTMLCanvasElement, number>();
+	anonElementNames = new WeakMap<any, string>();
+	_unseenIds = undefined;
+	_currentRefs = undefined;
+	_currentRefsEntry = undefined;
+	_currentCanvas = undefined;
+	_currentIsMounting = false;
+	_currentHookIndex = 0;
+	_currentRenderContext = undefined;
 }
 
-interface EventRegistrant {
-	path: Path2D;
-	transform: DOMMatrix;
-	config: CanvasMouseEventConfig;
-	handler: CanvasMouseEventHandler;
+/**
+ * Mounts or updates a canvas render component on a given HTMLCanvasElement
+ * @param canvas The canvas to render on
+ * @param element The CRC element to render
+ */
+export function crc<P>(canvas: HTMLCanvasElement, element: CompEl<P>) {
+	if (!refsStore.has(canvas)) {
+		const refs = new Map<string, CompRefs<P>>();
+		refsStore.set(canvas, refs);
+	}
+	update(canvas, element);
 }
 
-// Global during render.
-let _trackId: (id: string) => void;
+/**
+ * Creates a simple structure representing a component to be rendered.
+ * DOES NOT RENDER.
+ * @param comp Ther render function for a component
+ * @param props The props to pass to that render function on render
+ * @returns A structure that represents a component to be mounted or updated during render
+ */
+export function createElement<P>(comp: CompFn<P>, props: P): CompEl<P> {
+	return { type: comp, props };
+}
 
-export function createRenderingContext(canvas: HTMLCanvasElement) {
-	const actualContext = canvas.getContext('2d');
+/**
+ * Used to convert a component render function to a function that will return a component element.
+ * This is useful for now because setting up JSX is still annoying.
+ * @param compFn A component to create a simplfied function for
+ */
+export function defineComp<P>(compFn: CompFn<P>) {
+	return (props: P) => createElement(compFn, props);
+}
 
-	if (!actualContext) {
-		throw new TypeError('Unable to create 2d context');
+/**
+ * Gets the root element for a canvas and renders it. This is the
+ * entry point for rendering the entire tree.
+ * @param canvas The canvas to render on
+ */
+function executeRender(canvas: HTMLCanvasElement) {
+	renderIds.delete(canvas);
+	try {
+		_currentCanvas = canvas;
+		_currentRefs = refsStore.get(canvas);
+		const rootElement = roots.get(canvas)!;
+		const ctx = get2dContext(canvas);
+		_currentRenderContext = ctx;
+		_unseenIds = new Set(_currentRefs!.keys());
+		const id = 'root';
+		_unseenIds.delete(id);
+		render(rootElement, id);
+		for (const id of _unseenIds) {
+			_currentRefs.delete(id);
+		}
+	} finally {
+		_currentCanvas = undefined;
+		_currentRefs = undefined;
+		_currentRenderContext = undefined;
+		_unseenIds = undefined;
+	}
+}
+
+/**
+ *
+ * @param canvas The canvas with CRC mounted on it to update
+ * @param element The optional element to update as the root element of that canvas.
+ */
+export function update<P>(canvas: HTMLCanvasElement, element?: CompEl<P>) {
+	if (element) {
+		roots.set(canvas, element);
 	}
 
-	const transformStack: DOMMatrix[] = [actualContext.getTransform()];
-	const saveStack: DOMMatrix[] = [actualContext.getTransform()];
+	if (!roots.has(canvas) || !refsStore.has(canvas)) {
+		throw new Error('Canvas does not have CRC mounted.');
+	}
 
-	const getCurrentTransform = () => transformStack[transformStack.length - 1];
-
-	const isInPath = (
-		path: Path2D,
-		transform: DOMMatrix,
-		x: number,
-		y: number,
-		config?: CanvasMouseEventConfig,
-	) => {
-		actualContext.save();
-		actualContext.setTransform(transform);
-
-		const include = config?.include ?? 'fill';
-
-		let result = false;
-
-		if (include === 'all' || include === 'fill') {
-			result = result || actualContext.isPointInPath(path, x, y);
-		}
-
-		if (include === 'all' || include === 'stroke') {
-			actualContext.lineWidth = config?.lineWidth ?? 0;
-			result = result || actualContext.isPointInStroke(path, x, y);
-		}
-
-		actualContext.restore();
-		return result;
-	};
-
-	const clickHandlers: EventRegistrant[] = [];
-
-	const dblclickHandlers: EventRegistrant[] = [];
-
-	const contextMenuHandlers: EventRegistrant[] = [];
-
-	const mouseOverHandlers: EventRegistrant[] = [];
-
-	const mouseOutHandlers: EventRegistrant[] = [];
-
-	const mouseMoveHandlers: EventRegistrant[] = [];
-
-	const clearEventRegistry = () => {
-		clickHandlers.length = 0;
-		dblclickHandlers.length = 0;
-		contextMenuHandlers.length = 0;
-		mouseOverHandlers.length = 0;
-		mouseOutHandlers.length = 0;
-		mouseMoveHandlers.length = 0;
-	};
-
-	const onClick: EventRegistry['onClick'] = (path, handler, config) => {
-		clickHandlers.push({
-			path,
-			transform: getCurrentTransform(),
-			handler,
-			config,
-		});
-	};
-
-	const onDblClick: EventRegistry['onDblClick'] = (path, handler, config) => {
-		dblclickHandlers.push({
-			path,
-			transform: getCurrentTransform(),
-			handler,
-			config,
-		});
-	};
-
-	const onContextMenu: EventRegistry['onContextMenu'] = (
-		path,
-		handler,
-		config,
-	) => {
-		contextMenuHandlers.push({
-			path,
-			transform: getCurrentTransform(),
-			handler,
-			config,
-		});
-	};
-
-	const onMouseOver: EventRegistry['onMouseOver'] = (path, handler, config) => {
-		mouseOverHandlers.push({
-			path,
-			transform: getCurrentTransform(),
-			handler,
-			config,
-		});
-	};
-
-	const onMouseOut: EventRegistry['onMouseOut'] = (path, handler, config) => {
-		mouseOutHandlers.push({
-			path,
-			transform: getCurrentTransform(),
-			handler,
-			config,
-		});
-	};
-
-	const onMouseMove: EventRegistry['onMouseMove'] = (path, handler, config) => {
-		mouseMoveHandlers.push({
-			path,
-			transform: getCurrentTransform(),
-			handler,
-			config,
-		});
-	};
-
-	const eventRegistry: EventRegistry = {
-		onClick,
-		onDblClick,
-		onContextMenu,
-		onMouseOver,
-		onMouseOut,
-		onMouseMove,
-	};
-
-	const ac = new AbortController();
-
-	const subscription = {
-		unsubscribe() {
-			if (!ac.signal.aborted) {
-				clearEventRegistry();
-				ac.abort();
-			}
-		},
-	};
-
-	canvas.addEventListener(
-		'click',
-		(e) => {
-			const [x, y] = getMousePosition(e);
-			for (const { path, transform, handler, config } of clickHandlers) {
-				if (isInPath(path, transform, x, y, config)) {
-					try {
-						handler(e);
-					} catch (err) {
-						reportError(err);
-					}
-				}
-			}
-		},
-		{ signal: ac.signal },
-	);
-
-	canvas.addEventListener(
-		'dblclick',
-		(e) => {
-			const [x, y] = getMousePosition(e);
-			for (const { path, transform, handler, config } of dblclickHandlers) {
-				if (isInPath(path, transform, x, y, config)) {
-					try {
-						handler(e);
-					} catch (err) {
-						reportError(err);
-					}
-				}
-			}
-		},
-		{ signal: ac.signal },
-	);
-
-	canvas.addEventListener(
-		'contextmenu',
-		(e) => {
-			const [x, y] = getMousePosition(e);
-			for (const { path, transform, handler, config } of contextMenuHandlers) {
-				if (isInPath(path, transform, x, y, config)) {
-					try {
-						handler(e);
-					} catch (err) {
-						reportError(err);
-					}
-				}
-			}
-		},
-		{ signal: ac.signal },
-	);
-
-	const trackedMouseOutPaths = new Set<string>();
-	const trackedMouseOverPaths = new Set<string>();
-
-	let maybeDelete = new Set<string>();
-
-	const beginRender = () => {
-		clearEventRegistry();
-		maybeDelete = new Set([...trackedMouseOutPaths, ...trackedMouseOverPaths]);
-		_trackId = (id: string) => {
-			maybeDelete.delete(id);
-		};
-	};
-
-	const endRender = () => {
-		for (const id of maybeDelete) {
-			trackedMouseOutPaths.delete(id);
-			trackedMouseOverPaths.delete(id);
-		}
-	};
-
-	canvas.addEventListener('mousemove', (e) => {
-		const [x, y] = getMousePosition(e);
-		for (const { path, transform, handler, config } of mouseMoveHandlers) {
-			if (isInPath(path, transform, x, y, config)) {
-				try {
-					handler(e);
-				} catch (err) {
-					reportError(err);
-				}
-			}
-		}
-
-		for (const { path, transform, handler, config } of mouseOutHandlers) {
-			if (isInPath(path, transform, x, y, config)) {
-				trackedMouseOutPaths.add(config.id);
-			} else if (trackedMouseOutPaths.has(config.id)) {
-				trackedMouseOutPaths.delete(config.id);
-				try {
-					handler(e);
-				} catch (err) {
-					reportError(err);
-				}
-			}
-		}
-
-		for (const { path, transform, handler, config } of mouseOverHandlers) {
-			if (isInPath(path, transform, x, y, config)) {
-				trackedMouseOverPaths.delete(config.id);
-				try {
-					handler(e);
-				} catch (err) {
-					reportError(err);
-				}
-			} else if (trackedMouseOverPaths.has(config.id)) {
-				trackedMouseOverPaths.add(config.id);
-			}
-		}
-	});
-
-	const renderContext = new Proxy(actualContext, {
-		set(target, prop, reciever) {
-			return Reflect.set(target, prop, reciever);
-		},
-		get(target, prop) {
-			switch (prop) {
-				case 'rotate':
-				case 'translate':
-				case 'scale':
-				case 'transform':
-				case 'setTransform':
-					return (...args: unknown[]) => {
-						const result = (target[prop] as any)(...args);
-						transformStack.push(target.getTransform());
-						return result;
-					};
-
-				case 'save':
-					return () => {
-						const result = target[prop]();
-						saveStack.push(transformStack[transformStack.length - 1]);
-						return result;
-					};
-
-				case 'restore':
-					return function () {
-						const result = target[prop]();
-						const jumpTo = saveStack.pop();
-						while (transformStack[transformStack.length - 1] !== jumpTo) {
-							transformStack.pop();
-						}
-						return result;
-					};
-				case 'resetTransform':
-					return () => {
-						const result = target[prop]();
-						transformStack.length = 1;
-						saveStack.length = 1;
-						return result;
-					};
-			}
-
-			const result = (target as any)[prop];
-
-			if (typeof result === 'function') {
-				return (...args: any[]) => (target as any)[prop](...args);
-			}
-			return result;
-		},
-	});
-
-	return {
-		renderContext,
-		eventRegistry,
-		subscription,
-		beginRender,
-		endRender,
-	} as const;
+	if (!renderIds.has(canvas)) {
+		renderIds.set(
+			canvas,
+			requestAnimationFrame(() => executeRender(canvas)),
+		);
+	}
 }
 
-export function createRenderer(canvas: HTMLCanvasElement) {
-	const {
-		renderContext: ctx,
-		eventRegistry,
-		subscription,
-		beginRender,
-		endRender,
-	} = createRenderingContext(canvas);
+let anonElementNames = new WeakMap<any, string>();
 
-	const render = (comp: CanvasCompRenderer) => {
-		beginRender();
+let anon = 0;
+
+function getAnonElemName(fn: any) {
+	if (!anonElementNames.has(fn)) {
+		anonElementNames.set(fn, `Anon${anon++}`);
+	}
+	return anonElementNames.get(fn)!;
+}
+
+function getElementTypeName(element: CompEl) {
+	return (
+		element.props.key || element.type.name || getAnonElemName(element.type)
+	);
+}
+
+function render<P>(element: CompEl<P>, parentId: string) {
+	try {
+		const id = parentId + ':' + getElementTypeName(element);
+		_unseenIds.delete(id);
+		_currentIsMounting = !_currentRefs!.has(id);
+		if (_currentIsMounting) {
+			_currentRefs!.set(id, {
+				id,
+				element,
+				refs: [],
+			});
+		}
+
+		_currentRefsEntry = _currentRefs!.get(id)!;
+		_currentHookIndex = 0;
+
+		const ctx = _currentRenderContext!;
 		ctx.save();
-		ctx.clearRect(0, 0, canvas.width, canvas.height);
-		_trackId('#root');
-		comp(ctx, eventRegistry, '#root');
+		const result = element.type(element.props, ctx);
+		if (result) {
+			if (Array.isArray(result)) {
+				for (let i = 0; i < result.length; i++) {
+					const child = result[i];
+					render(child, id + ':' + i);
+				}
+			} else {
+				render(result, id);
+			}
+		}
 		ctx.restore();
-		endRender();
-	};
-
-	return {
-		render,
-		remove() {
-			subscription.unsubscribe();
-		},
-	};
+	} finally {
+		_currentIsMounting = false;
+		_currentRefsEntry = undefined;
+		_currentHookIndex = 0;
+	}
 }
 
-export function getMousePosition(e: MouseEvent): [number, number] {
-	const bounds = (e.target as HTMLElement).getBoundingClientRect();
-	const x = e.clientX - bounds.left;
-	const y = e.clientY - bounds.top;
-	return [x, y];
+interface CRCRef<T> {
+	current: T | undefined;
+}
+
+/**
+ * Hook: Creates a reference object, similar to React's useRef.
+ * @param init The initial reference value
+ * @returns A reference with a `current` property containing the value
+ */
+export function crcRef<T>(init?: T): CRCRef<T> {
+	if (_currentIsMounting) {
+		_currentRefsEntry!.refs.push({
+			type: 'ref',
+			current: init,
+		});
+	}
+
+	return _currentRefsEntry!.refs[_currentHookIndex++];
+}
+
+/**
+ * Hook: creates a tuple of state and a state setter. Setting the state with the
+ * state setter will cause the entire canvas CRC instance to be scheduled for
+ * rerender. If you set the state multiple times before the next animation frame,
+ * it will only rerender with whatever the most recent state is as of that animation frame.
+ * @param init The initial state
+ * @returns A tuple with the state, and a setter function
+ */
+export function crcState<T>(init?: T): readonly [T, (update: T) => void] {
+	if (_currentIsMounting) {
+		const ref = {
+			type: 'state',
+			value: init,
+			setter,
+		};
+
+		const canvas = _currentCanvas;
+
+		function setter(newValue: T) {
+			ref.value = newValue;
+			update(canvas!);
+		}
+
+		_currentRefsEntry!.refs.push(ref);
+	}
+
+	const ref = _currentRefsEntry!.refs[_currentHookIndex++];
+	return [ref.value, ref.setter] as const;
+}
+
+/**
+ * Hook: creates a memoized value, similar to React's `useMemo`.
+ * @param create The factory to create the memoized value.
+ * @param deps The deps to check to see if the memoized value needs to be updated.
+ * @returns The memoized value
+ */
+export function crcMemo<T>(create: () => T, deps: any[]): T {
+	const ref = crcRef<T>();
+
+	// NOTE: sync updates
+	crcWhenChanged(() => {
+		ref.current = create();
+	}, deps);
+
+	return ref.current as T;
+}
+
+/**
+ * Does a shallow diff check on the deps. If they've changed, it will synchronously
+ * call the provided call back. This is not like useEffect, but it's useful when
+ * a developer wants to diff a value. Also allows for a teardown to be returned that
+ * is called when deps change (very, very similar to useEffect, just ALWAYS synchronous).
+ * If you have work in here that only sets state, you should be using {@link crcMemo}
+ * instead.
+ * @param callback The SYNCHRONOUS callback when the deps have changed
+ * @param deps The deps to check for changes.
+ */
+export function crcWhenChanged(
+	callback: () => (() => void) | void,
+	deps?: any[],
+) {
+	if (_currentIsMounting) {
+		const ref = {
+			type: 'whenChanged',
+			lastDeps: undefined,
+			teardown: undefined,
+		};
+
+		_currentRefsEntry!.refs.push(ref);
+	}
+
+	const hookIndex = _currentHookIndex++;
+	const ref = _currentRefsEntry!.refs[hookIndex];
+	if (!ref.lastDeps || !deps || !shallowArrayEquals(deps, ref.lastDeps)) {
+		ref.teardown?.();
+		ref.lastDeps = deps;
+		ref.teardown = callback();
+	}
+}
+
+interface CRCMouseEvent {
+	x: number;
+	y: number;
+	originalEvent: MouseEvent;
+}
+
+function crcBasicMouseEvent({
+	type,
+	path,
+	handler,
+	fill = false,
+	lineWidth = 0,
+}: {
+	type: 'click' | 'dblclick' | 'mousemove' | 'contextmenu';
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineWidth?: number;
+}) {
+	crcWhenChanged(() => {
+		const ac = new AbortController();
+		const transform = _currentRenderContext!.getTransform();
+		_currentCanvas!.addEventListener(
+			type,
+			(e) => {
+				const canvas = e.target as HTMLCanvasElement;
+				const [x, y] = getMouseCoordinates(e);
+				const ctx = get2dContext(canvas);
+				ctx.setTransform(transform);
+				if (
+					(fill && ctx.isPointInPath(path, x, y)) ||
+					(lineWidth > 0 && ctx.isPointInStroke(path, x, y))
+				) {
+					handler({ x, y, originalEvent: e });
+				}
+			},
+			{ signal: ac.signal },
+		);
+		return () => {
+			ac.abort();
+		};
+	}, [type, path, handler, fill, lineWidth]);
+}
+
+/**
+ * Hook: For wiring up click events that correspond to a given Path.
+ * NOTE: If the path reference changes between, the click event will be
+ * torn down and re-registered. Be sure use the same instance of a Path if
+ * it doesn't change. {@link crcMemo} may be useful for this.
+ */
+export function crcClick(config: {
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineWidth?: number;
+}) {
+	crcBasicMouseEvent({
+		...config,
+		type: 'click',
+	});
+}
+
+/**
+ * Hook: For wiring up double click events that correspond to a given Path.
+ * NOTE: If the path reference changes between, the click event will be
+ * torn down and re-registered. Be sure use the same instance of a Path if
+ * it doesn't change. {@link crcMemo} may be useful for this.
+ */
+export function crcDblClick(config: {
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineWidth?: number;
+}) {
+	crcBasicMouseEvent({
+		...config,
+		type: 'dblclick',
+	});
+}
+
+/**
+ * Hook: For wiring up right-click events that correspond to a given Path.
+ * NOTE: If the path reference changes between, the click event will be
+ * torn down and re-registered. Be sure use the same instance of a Path if
+ * it doesn't change. {@link crcMemo} may be useful for this.
+ */
+export function crcContextMenu(config: {
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineWidth?: number;
+}) {
+	crcBasicMouseEvent({
+		...config,
+		type: 'contextmenu',
+	});
+}
+
+/**
+ * Hook: For wiring up mouse move events that correspond to a given Path.
+ * NOTE: If the path reference changes between, the click event will be
+ * torn down and re-registered. Be sure use the same instance of a Path if
+ * it doesn't change. {@link crcMemo} may be useful for this.
+ */
+export function crcMouseMove(config: {
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineWidth?: number;
+}) {
+	crcBasicMouseEvent({
+		...config,
+		type: 'mousemove',
+	});
+}
+
+/**
+ * Hook: For wiring up mouse over events that correspond to a given Path.
+ * NOTE: If the path reference changes between, the click event will be
+ * torn down and re-registered. Be sure use the same instance of a Path if
+ * it doesn't change. {@link crcMemo} may be useful for this.
+ */
+export function crcMouseOver(config: {
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineWidth?: number;
+}) {
+	crcMouseOverOrOut({
+		...config,
+		type: 'mouseover',
+	});
+}
+
+/**
+ * Hook: For wiring up mouse out events that correspond to a given Path.
+ * NOTE: If the path reference changes between, the click event will be
+ * torn down and re-registered. Be sure use the same instance of a Path if
+ * it doesn't change. {@link crcMemo} may be useful for this.
+ */
+export function crcMouseOut(config: {
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineWidth?: number;
+}) {
+	crcMouseOverOrOut({
+		...config,
+		type: 'mouseout',
+	});
+}
+
+function crcMouseOverOrOut({
+	type,
+	path,
+	handler,
+	fill = false,
+	lineWidth = 0,
+}: {
+	type: 'mouseover' | 'mouseout';
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineWidth?: number;
+}) {
+	const overRef = crcRef(false);
+
+	crcWhenChanged(() => {
+		const ac = new AbortController();
+		const transform = _currentRenderContext!.getTransform();
+
+		_currentCanvas!.addEventListener(
+			'mousemove',
+			(e) => {
+				const canvas = e.target as HTMLCanvasElement;
+				const [x, y] = getMouseCoordinates(e);
+				const ctx = get2dContext(canvas);
+				ctx.setTransform(transform);
+				const isOver =
+					(fill && ctx.isPointInPath(path, x, y)) ||
+					(lineWidth > 0 && ctx.isPointInStroke(path, x, y));
+
+				const wasOver = overRef.current;
+				if (isOver) {
+					overRef.current = true;
+					if (type === 'mouseover' && !wasOver) {
+						handler({
+							x,
+							y,
+							originalEvent: e,
+						});
+					}
+				} else {
+					overRef.current = false;
+					if (type === 'mouseout' && wasOver) {
+						handler({
+							x,
+							y,
+							originalEvent: e,
+						});
+					}
+				}
+			},
+			{
+				signal: ac.signal,
+			},
+		);
+
+		_currentCanvas!.addEventListener(
+			'mouseout',
+			(e) => {
+				overRef.current = false;
+				if (type === 'mouseout') {
+					const [x, y] = getMouseCoordinates(e);
+					handler({
+						x,
+						y,
+						originalEvent: e,
+					});
+				}
+			},
+			{
+				signal: ac.signal,
+			},
+		);
+
+		return () => ac.abort();
+	}, [type, path, handler, fill, lineWidth]);
+}
+
+/**
+ * Hook: For wiring up changes to the CSS cursor style while over a corresponding path.
+ * NOTE: If the path reference changes between, the click event will be
+ * torn down and re-registered. Be sure use the same instance of a Path if
+ * it doesn't change. {@link crcMemo} may be useful for this.
+ */
+export function crcCursor({
+	path,
+	style,
+	fill = false,
+	lineWidth = 0,
+}: {
+	path: Path2D;
+	style: string;
+	fill?: boolean;
+	lineWidth?: number;
+}) {
+	crcMouseOver({
+		path,
+		handler: (e) => {
+			const canvas = e.originalEvent.target as HTMLCanvasElement;
+			canvas.style.cursor = style;
+		},
+		fill,
+		lineWidth,
+	});
+
+	crcMouseOut({
+		path,
+		handler: (e) => {
+			const canvas = e.originalEvent.target as HTMLCanvasElement;
+			canvas.style.removeProperty('cursor');
+		},
+		fill,
+		lineWidth,
+	});
+}
+
+function getMouseCoordinates(event: MouseEvent): readonly [number, number] {
+	const target = event.target as HTMLElement;
+	const bounds = target.getBoundingClientRect();
+	const x = event.clientX - bounds.left;
+	const y = event.clientY - bounds.top;
+	return [x, y] as const;
+}
+
+function shallowArrayEquals<T>(arr1: T[], arr2: T[]): boolean {
+	if (arr1.length !== arr2.length) {
+		return false;
+	}
+	for (let i = 0; i < arr1.length; i++) {
+		if (arr1[i] !== arr2[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function get2dContext(canvas: HTMLCanvasElement) {
+	const ctx = canvas.getContext('2d');
+	if (!ctx) {
+		throw new Error('Unable to get 2d context!');
+	}
+	return ctx;
+}
+
+export interface CRCBasicMouseEvents {
+	onClick?: (e: CRCMouseEvent) => void;
+	onDblClick?: (e: CRCMouseEvent) => void;
+	onMouseMove?: (e: CRCMouseEvent) => void;
+	onMouseOver?: (e: CRCMouseEvent) => void;
+	onMouseOut?: (e: CRCMouseEvent) => void;
+	onContextMenu?: (e: CRCMouseEvent) => void;
 }
 
 type FillStyle = CanvasRenderingContext2D['fillStyle'];
 type StrokeStyle = CanvasRenderingContext2D['strokeStyle'];
 
-interface LineStyle {
+export interface AlphaProps {
+	alpha?: number;
+}
+
+export interface StrokeStyleProps {
 	strokeStyle?: StrokeStyle;
 	lineWidth?: number;
 }
 
-interface PathStyle {
+export interface FillStyleProps {
 	fillStyle?: FillStyle;
-	strokeStyle?: StrokeStyle;
-	lineWidth?: number;
+}
+
+export interface CursorStyleProps {
 	cursor?: string;
 }
 
-interface PathEvents {
-	onClick?: (e: MouseEvent) => void;
-	onDblClick?: (e: MouseEvent) => void;
-	onContextMenu?: (e: MouseEvent) => void;
-	onMouseOver?: (e: MouseEvent) => void;
-	onMouseOut?: (e: MouseEvent) => void;
-	onMouseMove?: (e: MouseEvent) => void;
+export interface PathProps
+	extends CRCBasicMouseEvents,
+		FillStyleProps,
+		StrokeStyleProps,
+		CursorStyleProps,
+		AlphaProps {
+	path: Path2D;
 }
 
-function handleCursorStyle(
-	ctx: CanvasRenderingContext2D,
-	eventRegistry: EventRegistry,
-	path: Path2D,
-	cursor: string,
-	eventConfig: CanvasMouseEventConfig,
-) {
-	const canvas = ctx.canvas;
-	eventRegistry.onMouseOver(
-		path,
-		() => {
-			canvas.style.cursor = cursor;
-		},
-		eventConfig,
-	);
-	eventRegistry.onMouseOut(
-		path,
-		() => {
-			canvas.style.removeProperty('cursor');
-		},
-		eventConfig,
-	);
+function Path(props: PathProps, ctx: CanvasRenderingContext2D) {
+	const { alpha, path, fillStyle, strokeStyle, lineWidth } = props;
+
+	if (alpha) {
+		ctx.globalAlpha = ctx.globalAlpha * alpha;
+	}
+
+	if (fillStyle) {
+		ctx.fillStyle = fillStyle;
+		ctx.fill(path);
+	}
+
+	if (strokeStyle && lineWidth && lineWidth > 0) {
+		(ctx.strokeStyle = strokeStyle), (ctx.lineWidth = lineWidth);
+		ctx.stroke(path);
+	}
+
+	const {
+		onClick,
+		onContextMenu,
+		onDblClick,
+		onMouseMove,
+		onMouseOut,
+		onMouseOver,
+	} = props;
+
+	if (onClick) {
+		crcClick({
+			path,
+			handler: onClick,
+			fill: !!fillStyle,
+			lineWidth,
+		});
+	}
+
+	if (onContextMenu) {
+		crcContextMenu({
+			path,
+			handler: onContextMenu,
+			fill: !!fillStyle,
+			lineWidth,
+		});
+	}
+
+	if (onDblClick) {
+		crcDblClick({
+			path,
+			handler: onDblClick,
+			fill: !!fillStyle,
+			lineWidth,
+		});
+	}
+
+	if (onMouseOver) {
+		crcMouseOver({
+			path,
+			handler: onMouseOver,
+			fill: !!fillStyle,
+			lineWidth,
+		});
+	}
+
+	if (onMouseMove) {
+		crcMouseMove({
+			path,
+			handler: onMouseMove,
+			fill: !!fillStyle,
+			lineWidth,
+		});
+	}
+
+	if (onMouseOut) {
+		crcMouseOut({
+			path,
+			handler: onMouseOut,
+			fill: !!fillStyle,
+			lineWidth,
+		});
+	}
+
+	const { cursor } = props;
+
+	if (cursor) {
+		crcCursor({ path, style: cursor, fill: !!fillStyle, lineWidth });
+	}
 }
 
-export function rect(props: {
+/**
+ * Creates a renderable Path component element.
+ */
+export const path = defineComp(Path);
+
+export interface RectProps
+	extends CRCBasicMouseEvents,
+		FillStyleProps,
+		StrokeStyleProps,
+		AlphaProps,
+		CursorStyleProps {
 	x: number;
 	y: number;
 	width: number;
 	height: number;
-	style?: PathStyle;
-	events?: PathEvents;
-}): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		ctx.save();
-		const { x, y, width, height, style, events } = props;
-
-		const fillStyle = style?.fillStyle;
-		if (fillStyle) {
-			ctx.fillStyle = fillStyle;
-			ctx.fillRect(x, y, width, height);
-		}
-
-		const { strokeStyle, lineWidth } = style ?? {};
-		if (strokeStyle && lineWidth) {
-			ctx.strokeStyle = strokeStyle;
-			ctx.lineWidth = lineWidth;
-			ctx.strokeRect(x, y, width, height);
-		}
-
-		const path = new Path2D();
-		path.rect(x, y, width, height);
-
-		const id = `${parentId}:rect`;
-		_trackId(id);
-
-		const eventConfig: CanvasMouseEventConfig = {
-			id,
-			include: 'all',
-			lineWidth: style?.lineWidth ?? 0,
-		};
-
-		if (events) {
-			manageEvents(events, eventRegistry, path, eventConfig);
-		}
-
-		if (style?.cursor) {
-			handleCursorStyle(ctx, eventRegistry, path, style?.cursor, eventConfig);
-		}
-
-		ctx.restore();
-	};
 }
 
-function manageEvents(
-	events: PathEvents,
-	eventRegistry: EventRegistry,
-	path: Path2D,
-	config: CanvasMouseEventConfig,
-) {
-	for (const [eventKey, handler] of Object.entries(events)) {
-		(eventRegistry as any)[eventKey](path, handler, config);
-	}
+function Rect(props: RectProps, ctx: CanvasRenderingContext2D) {
+	const { x, y, width, height, ...pathProps } = props;
+	const rectPath = crcRectPath(x, y, width, height);
+	return Path(
+		{
+			...pathProps,
+			path: rectPath,
+		},
+		ctx,
+	);
 }
 
-export function line(props: {
-	x1: number;
-	y1: number;
-	x2: number;
-	y2: number;
-	style?: LineStyle & { cursor?: string };
-	hitPadding?: number;
-	events?: PathEvents;
-}): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		ctx.save();
-		const { x1, y1, x2, y2, style, hitPadding = 5, events } = props;
+/**
+ * Creates a renderable Rect component element.
+ */
+export const rect = defineComp(Rect);
 
-		const { lineWidth = 1, strokeStyle } = style ?? {};
-
-		const path = new Path2D();
-		path.moveTo(x1, y1);
-		path.lineTo(x2, y2);
-
-		if (strokeStyle) {
-			ctx.strokeStyle = strokeStyle;
-			ctx.lineWidth = lineWidth;
-			ctx.stroke(path);
-		}
-
-		const id = `${parentId}:line`;
-		_trackId(id);
-
-		const eventConfig: CanvasMouseEventConfig = {
-			id,
-			include: 'all',
-			lineWidth: (style?.lineWidth ?? 0) + hitPadding,
-		};
-
-		if (events) {
-			manageEvents(events, eventRegistry, path, eventConfig);
-		}
-
-		if (style?.cursor) {
-			handleCursorStyle(ctx, eventRegistry, path, style.cursor, eventConfig);
-		}
-
-		ctx.restore();
-	};
+export interface LineProps extends CRCBasicMouseEvents, StrokeStyleProps {
+	coords: [number, number][];
 }
 
-export function verticalLine(props: {
+function Line(props: LineProps, ctx: CanvasRenderingContext2D) {
+	const { coords, ...pathProps } = props;
+	const linePath = crcLinePath(coords);
+
+	return Path(
+		{
+			...pathProps,
+			path: linePath,
+		},
+		ctx,
+	);
+}
+
+/**
+ * Creates a renderable Line component element.
+ */
+export const line = defineComp(Line);
+
+export interface VerticalLineProps
+	extends CRCBasicMouseEvents,
+		StrokeStyleProps {
 	x: number;
-	y1?: number;
-	y2?: number;
-	style?: LineStyle;
-	hitPadding?: number;
-	events?: PathEvents;
-}): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		const { x, y1 = 0, y2 = ctx.canvas.height, ...rest } = props;
-		return line({ ...rest, x1: x, x2: x, y1, y2 })(
-			ctx,
-			eventRegistry,
-			parentId,
-		);
-	};
+	top?: number;
+	bottom?: number;
+	alignToPixelGrid?: boolean;
 }
 
-export function horizontalLine(props: {
+function VerticalLine(props: VerticalLineProps, ctx: CanvasRenderingContext2D) {
+	const {
+		x: initialX,
+		top = 0,
+		bottom = ctx.canvas.height,
+		alignToPixelGrid = false,
+		...lineProps
+	} = props;
+	const x = alignToPixelGrid
+		? Math.round(initialX) - ((props.lineWidth ?? 0) % 1)
+		: initialX;
+	const coords: [number, number][] = [
+		[x, top],
+		[x, bottom],
+	];
+	return Line(
+		{
+			coords,
+			...lineProps,
+		},
+		ctx,
+	);
+}
+
+/**
+ * Creates a renderable VerticalLine component element.
+ */
+export const verticalLine = defineComp(VerticalLine);
+
+export interface HorizontalLineProps
+	extends CRCBasicMouseEvents,
+		StrokeStyleProps {
 	y: number;
-	x1?: number;
-	x2?: number;
-	style?: LineStyle;
-	hitPadding?: number;
-	events?: PathEvents;
-}): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		const { y, x1 = 0, x2 = ctx.canvas.width, ...rest } = props;
-		return line({ ...rest, x1, x2, y1: y, y2: y })(
-			ctx,
-			eventRegistry,
-			parentId,
-		);
-	};
+	left?: number;
+	right?: number;
+	alignToPixelGrid?: boolean;
 }
 
-export function img(props: {
-	img: HTMLImageElement;
+function HorizontalLine(
+	props: HorizontalLineProps,
+	ctx: CanvasRenderingContext2D,
+) {
+	const {
+		y: initialY,
+		left = 0,
+		right = ctx.canvas.width,
+		alignToPixelGrid = false,
+		...lineProps
+	} = props;
+	const y = alignToPixelGrid
+		? Math.round(initialY) - ((props.lineWidth ?? 0) % 1)
+		: initialY;
+
+	const coords: [number, number][] = [
+		[left, y],
+		[right, y],
+	];
+
+	return Line(
+		{
+			coords,
+			...lineProps,
+		},
+		ctx,
+	);
+}
+
+/**
+ * Creates a renderable HorizontalLine component element
+ */
+export const horizontalLine = defineComp(HorizontalLine);
+
+export interface ImgProps extends CRCBasicMouseEvents, AlphaProps {
+	image: HTMLImageElement;
 	x: number;
 	y: number;
 	width?: number;
 	height?: number;
-	style?: LineStyle & { cursor?: string };
-	events?: PathEvents;
-}): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		ctx.save();
-		const {
-			img,
-			x,
-			y,
-			width = img.width,
-			height = img.height,
-			style,
-			events,
-		} = props;
-		ctx.drawImage(img, x, y, width, height);
-
-		const { lineWidth, strokeStyle } = style ?? {};
-
-		if (lineWidth && strokeStyle) {
-			ctx.strokeStyle = strokeStyle;
-			ctx.lineWidth = lineWidth;
-			ctx.strokeRect(x, y, width, height);
-		}
-
-		const path = new Path2D();
-		path.rect(x, y, width, height);
-
-		const id = `${parentId}:img`;
-		_trackId(id);
-
-		const eventConfig: CanvasMouseEventConfig = {
-			id,
-			include: lineWidth ? 'all' : 'fill',
-			lineWidth: lineWidth,
-		};
-
-		if (events) {
-			manageEvents(events, eventRegistry, path, eventConfig);
-		}
-
-		if (style?.cursor) {
-			handleCursorStyle(ctx, eventRegistry, path, style.cursor, eventConfig);
-		}
-
-		ctx.restore();
-	};
 }
 
-export function group(children: CanvasCompRenderer[]): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		for (let i = 0; i < children.length; i++) {
-			const child = children[i];
-			ctx.save();
-			const id = `${parentId}:${i}`;
-			_trackId(id);
-			child(ctx, eventRegistry, id);
-			ctx.restore();
-		}
-	};
+function Img(props: ImgProps, ctx: CanvasRenderingContext2D) {
+	const {
+		alpha,
+		image,
+		x,
+		y,
+		width = image.width,
+		height = image.height,
+		...otherProps
+	} = props;
+
+	if (alpha) {
+		ctx.globalAlpha = ctx.globalAlpha * alpha;
+	}
+
+	ctx.drawImage(image, x, y, width, height);
+	const imagePath = crcRectPath(x, y, width, height);
+
+	// For event handling.
+	return Path(
+		{
+			path: imagePath,
+			...otherProps,
+		},
+		ctx,
+	);
 }
 
-export function scale(
-	scale: number | [number, number],
-	renderer: CanvasCompRenderer,
-): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		ctx.save();
-		const [x, y] = Array.isArray(scale) ? scale : [scale, scale];
-		ctx.scale(x, y);
-		const id = `${parentId}:scale`;
-		_trackId(id);
-		renderer(ctx, eventRegistry, id);
-		ctx.restore();
-	};
-}
+/**
+ * Creates a renderable Img component element.
+ */
+export const img = defineComp(Img);
 
-export function translate(
+/**
+ * Creates a memoized Path2D for a rectangle. Useful when
+ * defining events efficiently.
+ * @returns A memoized Path2D
+ */
+export function crcRectPath(
 	x: number,
 	y: number,
-	renderer: CanvasCompRenderer,
-): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		ctx.save();
-		ctx.translate(x, y);
-		const id = `${parentId}:translate`;
-		_trackId(id);
-		renderer(ctx, eventRegistry, id);
-		ctx.restore();
-	};
+	width: number,
+	height: number,
+): Path2D {
+	return crcMemo(() => {
+		const path = new Path2D();
+		path.rect(x, y, width, height);
+		return path;
+	}, [x, y, width, height]);
 }
 
-export function rotate(
-	angle: number,
-	renderer: CanvasCompRenderer,
-): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		ctx.save();
-		ctx.rotate(angle);
-		const id = `${parentId}:rotate`;
-		_trackId(id);
-		renderer(ctx, eventRegistry, id);
-		ctx.restore();
-	};
-}
-
-export function transform(
-	matrix: DOMMatrix,
-	renderer: CanvasCompRenderer,
-): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		ctx.save();
-		ctx.setTransform(matrix);
-		renderer(ctx, eventRegistry, `${parentId}:${matrix}`);
-		ctx.restore();
-	};
-}
-
-export function clipRect(
-	rect: {
-		x: number;
-		y: number;
-		width: number;
-		height: number;
-	},
-	renderer: CanvasCompRenderer,
-) {
-	const path = new Path2D();
-	path.rect(rect.x, rect.y, rect.width, rect.height);
-	return clip(path, renderer);
-}
-
-export function clip(
-	path: Path2D,
-	renderer: CanvasCompRenderer,
-): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		ctx.save();
-		ctx.clip(path);
-		const id = parentId + ':clip';
-		_trackId(id);
-		renderer(ctx, eventRegistry, id);
-		ctx.restore();
-	};
-}
-
-export function text(props: {
-	text: string;
-	x: number;
-	y: number;
-	style: PathStyle & {
-		textAlign?: CanvasTextAlign;
-		textBaseline?: CanvasTextBaseline;
-		overflow?: 'visible' | 'ellipsis';
-		maxWidth?: number;
-		maxHeight?: number;
-		wordWrap?: boolean;
-		font?: string;
-		lineHeight?: number;
-	};
-	events?: PathEvents;
-}): CanvasCompRenderer {
-	return (ctx, eventRegistry, parentId) => {
-		ctx.save();
-		const { x, y, style, events } = props;
-
-		const {
-			strokeStyle,
-			fillStyle,
-			lineWidth,
-			textAlign,
-			textBaseline,
-			font,
-			maxWidth = Infinity,
-			maxHeight = Infinity,
-			lineHeight = 20,
-			overflow,
-			wordWrap = false,
-		} = style;
-
-		ctx.font = font ?? '13px sans-serif';
-		ctx.textBaseline = textBaseline ?? 'top';
-		ctx.textAlign = textAlign ?? 'left';
-
-		const renderText = (txt: string, y: number) => {
-			if (strokeStyle && lineWidth) {
-				ctx.strokeStyle = strokeStyle;
-				ctx.lineWidth = lineWidth;
-				ctx.strokeText(txt, x, y, maxWidth);
-			}
-
-			if (fillStyle) {
-				ctx.fillStyle = fillStyle;
-				ctx.fillText(txt, x, y, maxWidth);
-			}
-		};
-
-		let textWidth = 0;
-		let textHeight = 0;
-
-		if (wordWrap) {
-			const words = props.text.split(' ');
-			let line = '';
-			let lineCount = 0;
-
-			while (words.length) {
-				if (maxHeight < y + lineCount * lineHeight + lineHeight) {
-					const remaining = words.join(' ');
-					const lastLine =
-						overflow === 'ellipsis' && maxWidth
-							? getEllipsisText(ctx, remaining, maxWidth)
-							: remaining;
-
-					renderText(lastLine, y + lineCount * lineHeight);
-				} else {
-					if (maxWidth < ctx.measureText(line + words[0]).width) {
-						const bounds = ctx.measureText(line);
-						textWidth = Math.max(bounds.width);
-						textHeight =
-							lineCount * lineHeight +
-							bounds.actualBoundingBoxDescent -
-							bounds.actualBoundingBoxAscent;
-						renderText(line, y + lineCount * lineHeight);
-						line = '';
-						lineCount++;
-					}
-					line += words.shift() + ' ';
-				}
-			}
-		} else {
-			const text =
-				overflow === 'ellipsis' && maxWidth
-					? getEllipsisText(ctx, props.text, maxWidth)
-					: props.text;
-
-			renderText(text, y);
-
-			const bounds = ctx.measureText(text);
-			textWidth = bounds.width;
-			textHeight =
-				bounds.actualBoundingBoxDescent - bounds.actualBoundingBoxAscent;
-		}
-
-		if (events || style.cursor) {
-			const id = `${parentId}:text`;
-			_trackId(id);
-			const path = new Path2D();
-			path.rect(x, y, textWidth, textHeight);
-
-			const eventConfig: CanvasMouseEventConfig = {
-				id,
-				include: lineWidth ? 'all' : 'fill',
-				lineWidth: lineWidth,
-			};
-
-			if (events) {
-				manageEvents(events, eventRegistry, path, eventConfig);
-			}
-
-			if (style.cursor) {
-				handleCursorStyle(ctx, eventRegistry, path, style.cursor, eventConfig);
+/**
+ * Creates a memoized Path2D for a set of line coordinates.
+ * @returns A memoized Path2D
+ */
+export function crcLinePath(coords: [number, number][]): Path2D {
+	return crcMemo(() => {
+		const path = new Path2D();
+		for (let i = 0; i < coords.length; i++) {
+			const [x, y] = coords[i];
+			if (i === 0) {
+				path.moveTo(x, y);
+			} else {
+				path.lineTo(x, y);
 			}
 		}
-
-		ctx.restore();
-	};
+		return path;
+	}, coords.flat());
 }
 
-function getEllipsisText(
-	renderContext: CanvasRenderingContext2D,
-	text: string,
-	maxWidth: number,
-) {
-	const metrics = renderContext.measureText(text);
+/**
+ * Creates a memoized Path2D for an SVG data string.
+ * @returns A memoized Path2D
+ */
+export function crcSvgPath(svgPathData: string): Path2D {
+	return crcMemo(() => new Path2D(svgPathData), [svgPathData]);
+}
 
-	if (metrics.width < maxWidth) {
-		return text;
+export interface SvgPathProps
+	extends CRCBasicMouseEvents,
+		FillStyleProps,
+		StrokeStyleProps,
+		AlphaProps,
+		CursorStyleProps {
+	d: string;
+}
+
+function SvgPath(props: SvgPathProps, ctx: CanvasRenderingContext2D) {
+	const { d, ...pathProps } = props;
+	const svgPath = crcSvgPath(d);
+	return Path(
+		{
+			...pathProps,
+			path: svgPath,
+		},
+		ctx,
+	);
+}
+
+/**
+ * Creates a renderable SvgPath component element.
+ */
+export const svgPath = defineComp(SvgPath);
+
+export interface GProps {
+	children: CompEl[];
+	scaleX?: number;
+	scaleY?: number;
+	rotate?: number;
+	x?: number;
+	y?: number;
+	skewX?: number;
+	skewY?: number;
+}
+
+function G(props: GProps, ctx: CanvasRenderingContext2D) {
+	const transform = new DOMMatrix();
+
+	const { scaleX = 1, scaleY = 1 } = props;
+	if (scaleX !== 1 || scaleY !== 1) {
+		transform.scaleSelf(scaleX, scaleY);
 	}
 
-	let low = -1;
-	let high = text.length;
-
-	while (1 + low < high) {
-		const mid = low + ((high - low) >> 1);
-		if (
-			isTextTooWide(renderContext, text.substring(0, mid) + '...', maxWidth)
-		) {
-			high = mid;
-		} else {
-			low = mid;
-		}
+	const { rotate } = props;
+	if (rotate) {
+		transform.rotateSelf(rotate);
 	}
 
-	const properLength = high - 1;
-	return text.substring(0, properLength) + '...';
+	const { x = 0, y = 0 } = props;
+	if (x || y) {
+		transform.translateSelf(x, y);
+	}
+
+	const { skewX } = props;
+	if (skewX) {
+		transform.skewXSelf(skewX);
+	}
+
+	const { skewY } = props;
+	if (skewY) {
+		transform.skewYSelf(skewY);
+	}
+
+	ctx.setTransform(transform);
+
+	return props.children;
 }
 
-function isTextTooWide(
-	renderContext: CanvasRenderingContext2D,
-	text: string,
-	maxWidth: number,
-) {
-	const metrics = renderContext.measureText(text);
-	return maxWidth < metrics.width;
-}
+/**
+ * Creates a group element that can be used to define transformations on a set
+ * of related CRC elements.
+ */
+export const g = defineComp(G);

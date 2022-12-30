@@ -1,18 +1,25 @@
 {
 	"name": "canvas-render-components",
-	"version": "0.0.1",
+	"version": "0.0.6",
 	"description": "HTML Canvas Componentized Rendering",
+	"types": "./dist/types/index.d.ts",
+	"main": "./dist/cjs/index.js",
+	"module": "./dist/esm/index.js",
 	"exports": {
-		".": {
-			"import": "./dist/esm/index.js",
-			"require": "./dist/cjs/index.js"
-		}
+		"import": "./dist/esm/index.js",
+		"require": "./dist/cjs/index.js",
+		"types": "./dist/types/index.d.ts"
 	},
+	"files": [
+		"dist/"
+	],
 	"scripts": {
 		"build:esm": "rm -rf dist/esm && swc src/ -d dist/esm -C minify=true",
-		"build:cjs": "rm -rf dist/cjs && src src/ -d dist/cjs -C module.type=commonjs",
-		"build": "npm run build:esm && npm run build:cjs",
-		"test": "echo \"Error: no test specified\" && exit 1"
+		"build:cjs": "rm -rf dist/cjs && swc src/ -d dist/cjs -C module.type=commonjs",
+		"build:types": "rm -rf dist/types && tsc",
+		"build": "npm run build:types && npm run build:esm && npm run build:cjs",
+		"test": "echo \"Error: no test specified\" && exit 1",
+		"prepublish": ""
 	},
 	"repository": {
 		"type": "git",
