@@ -153,10 +153,7 @@ function executeRender(canvas: HTMLCanvasElement) {
 			_canvasComponentRefsLookup.delete(id);
 		}
 	} finally {
-		_canvas = undefined;
-		_canvasComponentRefsLookup = undefined;
-		_renderContext = undefined;
-		_unseenIds = undefined;
+		clearTempState();
 	}
 }
 
@@ -219,9 +216,7 @@ function render<P>(element: CompEl<P>, parentId: string) {
 		}
 		ctx.restore();
 	} finally {
-		_componentIsMounting = false;
-		_componentRefs = undefined;
-		_compnentHookIndex = 0;
+		clearComponentState();
 	}
 }
 
@@ -1063,6 +1058,7 @@ export interface GProps {
 	scaleX?: number;
 	scaleY?: number;
 	rotate?: number;
+	rotateOrigin?: [number, number];
 	x?: number;
 	y?: number;
 	skewX?: number;
@@ -1070,36 +1066,194 @@ export interface GProps {
 }
 
 function G(props: GProps, ctx: CanvasRenderingContext2D) {
-	const transform = new DOMMatrix();
+	let transform = new DOMMatrix();
 
 	const { scaleX = 1, scaleY = 1 } = props;
 	if (scaleX !== 1 || scaleY !== 1) {
-		transform.scaleSelf(scaleX, scaleY);
+		transform = transform.scale(scaleX, scaleY);
 	}
 
 	const { rotate } = props;
 	if (rotate) {
-		transform.rotateSelf(rotate);
+		const [rox, roy] = props.rotateOrigin ?? [0, 0];
+		transform = transform
+			.translate(rox, roy)
+			.rotate(rotate)
+			.translate(-rox, -roy);
 	}
 
 	const { x = 0, y = 0 } = props;
 	if (x || y) {
-		transform.translateSelf(x, y);
+		transform = transform.translate(x, y);
 	}
 
 	const { skewX } = props;
 	if (skewX) {
-		transform.skewXSelf(skewX);
+		transform = transform.skewX(skewX);
 	}
 
 	const { skewY } = props;
 	if (skewY) {
-		transform.skewYSelf(skewY);
+		transform = transform.skewY(skewY);
 	}
 
 	ctx.setTransform(transform);
 
 	return props.children;
+}
+
+export interface TextProps
+	extends CRCBasicMouseEvents,
+		FillStyleProps,
+		StrokeStyleProps,
+		AlphaProps,
+		CursorStyleProps {
+	text: string;
+	x: number;
+	y: number;
+	maxWidth?: number;
+	maxHeight?: number;
+	lineHeight?: number;
+	overflow?: 'clip' | 'ellipsis';
+	wordWrap?: boolean;
+	font?: string;
+	textBaseline?: CanvasTextBaseline;
+	textAlign?: CanvasTextAlign;
+}
+
+export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
+	const {
+		font = '13px sans-serif',
+		textBaseline = 'top',
+		textAlign = 'left',
+	} = props;
+
+	ctx.font = font;
+	ctx.textBaseline = textBaseline;
+	ctx.textAlign = textAlign;
+
+	const { strokeStyle, lineWidth, fillStyle, x, maxWidth } = props;
+
+	const renderText = (txt: string, y: number) => {
+		if (strokeStyle && lineWidth) {
+			ctx.strokeStyle = strokeStyle;
+			ctx.lineWidth = lineWidth;
+			ctx.strokeText(txt, x, y, maxWidth);
+		}
+
+		if (fillStyle) {
+			ctx.fillStyle = fillStyle;
+			ctx.fillText(txt, x, y, maxWidth);
+		}
+	};
+
+	let textWidth = 0;
+	let textHeight = 0;
+
+	const { y, wordWrap } = props;
+
+	if (wordWrap) {
+		const words = props.text.split(' ');
+		let line = '';
+		let lineCount = 0;
+
+		const updateTextBounds = (line: string) => {
+			const bounds = ctx.measureText(line);
+			textWidth = Math.max(bounds.width);
+			textHeight =
+				lineCount * lineHeight +
+				bounds.actualBoundingBoxDescent -
+				bounds.actualBoundingBoxAscent;
+		};
+
+		const { maxHeight, lineHeight = 13, overflow = 'clip' } = props;
+
+		while (words.length) {
+			const currentYOffset = lineCount * lineHeight;
+			const nextYOffset = currentYOffset + lineHeight;
+			console.log({
+				words: Array.from(words),
+				maxHeight,
+				nextYOffset,
+				lineCount,
+				line,
+			});
+			if (maxHeight < nextYOffset + lineHeight) {
+				const remaining = words.join(' ');
+				const lastLine =
+					overflow === 'ellipsis' && maxWidth
+						? getEllipsisText(ctx, remaining, maxWidth)
+						: remaining;
+				updateTextBounds(lastLine);
+				renderText(lastLine, y + currentYOffset);
+				break;
+			} else {
+				if (maxWidth < ctx.measureText(line + words[0]).width) {
+					updateTextBounds(line);
+					renderText(line, y + currentYOffset);
+					line = '';
+					lineCount++;
+				}
+				line += words.shift() + ' ';
+			}
+		}
+	} else {
+		const text =
+			props.overflow === 'ellipsis' && maxWidth
+				? getEllipsisText(ctx, props.text, maxWidth)
+				: props.text;
+
+		renderText(text, y);
+
+		const bounds = ctx.measureText(text);
+		textWidth = bounds.width;
+		textHeight =
+			bounds.actualBoundingBoxDescent - bounds.actualBoundingBoxAscent;
+	}
+
+	const textPath = crcRectPath(x, y, textWidth, textHeight);
+
+	wireCommonEvents(props, textPath, true, lineWidth);
+}
+
+export const text = defineComp(Text);
+
+function getEllipsisText(
+	renderContext: CanvasRenderingContext2D,
+	text: string,
+	maxWidth: number,
+) {
+	const metrics = renderContext.measureText(text);
+
+	if (metrics.width < maxWidth) {
+		return text;
+	}
+
+	let low = -1;
+	let high = text.length;
+
+	while (1 + low < high) {
+		const mid = low + ((high - low) >> 1);
+		if (
+			isTextTooWide(renderContext, text.substring(0, mid) + '...', maxWidth)
+		) {
+			high = mid;
+		} else {
+			low = mid;
+		}
+	}
+
+	const properLength = high - 1;
+	return text.substring(0, properLength) + '...';
+}
+
+function isTextTooWide(
+	renderContext: CanvasRenderingContext2D,
+	text: string,
+	maxWidth: number,
+) {
+	const metrics = renderContext.measureText(text);
+	return maxWidth < metrics.width;
 }
 
 /**
