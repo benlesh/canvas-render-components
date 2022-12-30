@@ -1,45 +1,57 @@
 {
-	"name": "canvas-render-components",
-	"version": "0.0.6",
-	"description": "HTML Canvas Componentized Rendering",
-	"types": "./dist/types/index.d.ts",
-	"main": "./dist/cjs/index.js",
-	"module": "./dist/esm/index.js",
-	"exports": {
-		"import": "./dist/esm/index.js",
-		"require": "./dist/cjs/index.js",
-		"types": "./dist/types/index.d.ts"
-	},
-	"files": [
-		"dist/"
-	],
-	"scripts": {
-		"build:esm": "rm -rf dist/esm && swc src/ -d dist/esm -C minify=true",
-		"build:cjs": "rm -rf dist/cjs && swc src/ -d dist/cjs -C module.type=commonjs",
-		"build:types": "rm -rf dist/types && tsc",
-		"build": "npm run build:types && npm run build:esm && npm run build:cjs",
-		"test": "echo \"Error: no test specified\" && exit 1",
-		"prepublish": ""
-	},
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/benlesh/canvas-render-components.git"
-	},
-	"keywords": [
-		"HTML",
-		"Canvas",
-		"Components"
-	],
-	"author": "Ben Lesh <ben@benlesh.com>",
-	"license": "MIT",
-	"bugs": {
-		"url": "https://github.com/benlesh/canvas-render-components/issues"
-	},
-	"homepage": "https://github.com/benlesh/canvas-render-components#readme",
-	"devDependencies": {
-		"@swc/cli": "^0.1.57",
-		"@swc/core": "^1.3.24",
-		"prettier": "^2.8.1",
-		"typescript": "^4.9.4"
-	}
+  "name": "canvas-render-components",
+  "version": "0.0.6",
+  "description": "HTML Canvas Componentized Rendering",
+  "types": "./dist/types/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "exports": {
+    "import": "./dist/esm/index.js",
+    "require": "./dist/cjs/index.js",
+    "types": "./dist/types/index.d.ts"
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build:esm": "rm -rf dist/esm && swc src/ -d dist/esm -C minify=true",
+    "build:cjs": "rm -rf dist/cjs && swc src/ -d dist/cjs -C module.type=commonjs",
+    "build:types": "rm -rf dist/types && tsc",
+    "build": "npm run build:types && npm run build:esm && npm run build:cjs",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepublish": "",
+    "storybook": "start-storybook -p 6006",
+    "build-storybook": "build-storybook"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benlesh/canvas-render-components.git"
+  },
+  "keywords": [
+    "HTML",
+    "Canvas",
+    "Components"
+  ],
+  "author": "Ben Lesh <ben@benlesh.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/benlesh/canvas-render-components/issues"
+  },
+  "homepage": "https://github.com/benlesh/canvas-render-components#readme",
+  "devDependencies": {
+    "@babel/core": "^7.20.7",
+    "@storybook/addon-actions": "^6.5.15",
+    "@storybook/addon-essentials": "^6.5.15",
+    "@storybook/addon-interactions": "^6.5.15",
+    "@storybook/addon-links": "^6.5.15",
+    "@storybook/builder-webpack4": "^6.5.15",
+    "@storybook/html": "^6.5.15",
+    "@storybook/manager-webpack4": "^6.5.15",
+    "@storybook/testing-library": "^0.0.13",
+    "@swc/cli": "^0.1.57",
+    "@swc/core": "^1.3.24",
+    "babel-loader": "^8.3.0",
+    "prettier": "^2.8.1",
+    "typescript": "^4.9.4"
+  }
 }

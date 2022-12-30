@@ -5,6 +5,7 @@
     "target": "ES2022",
     "emitDeclarationOnly": true,
     "declaration": true,
-    "outDir": "dist/types"
+    "outDir": "dist/types",
+    "moduleResolution": "node"
   }
 }
