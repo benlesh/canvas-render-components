@@ -2,6 +2,8 @@
 
 Super duper alpha.. Use at your own risk. lol
 
+There's a [playground link here on Stackblitz](https://stackblitz.com/fork/canvas-render-components).
+
 ## Known Issues and Missing Features
 
 - **THERE ARE NO TESTS!! (duh, huge red flag!)**
