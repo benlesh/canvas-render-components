@@ -1,9 +1,9 @@
 import { Meta } from '@storybook/html';
-import { img } from '../index';
-import { createTemplate } from './util';
+import { img } from '../../index';
+import { createTemplate } from './../util';
 
 export default {
-	title: 'Example/img',
+	title: 'Components/img',
 } as Meta;
 
 const template = createTemplate(img);

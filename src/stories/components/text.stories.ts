@@ -1,9 +1,9 @@
 import { Meta } from '@storybook/html';
-import { text } from '../index';
-import { createTemplate } from './util';
+import { text } from '../../index';
+import { createTemplate } from './../util';
 
 export default {
-	title: 'Example/text',
+	title: 'Components/text',
 } as Meta;
 
 const template = createTemplate(text);

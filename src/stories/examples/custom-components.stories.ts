@@ -1,6 +1,6 @@
 import { Meta } from '@storybook/html';
-import { CRCMouseEvent, crcState, defineComp, rect, text } from '../index';
-import { createTemplate } from './util';
+import { CRCMouseEvent, crcState, defineComp, rect, text } from '../../index';
+import { createTemplate } from '../util';
 
 export default {
 	title: 'Example/custom-components',

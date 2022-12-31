@@ -1,9 +1,9 @@
 import { Meta } from '@storybook/html';
-import { svgPath } from '../index';
-import { createTemplate } from './util';
+import { svgPath } from '../../index';
+import { createTemplate } from './../util';
 
 export default {
-	title: 'Example/svgPath',
+	title: 'Components/svgPath',
 } as Meta;
 
 const template = createTemplate(svgPath);

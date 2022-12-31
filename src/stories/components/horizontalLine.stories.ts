@@ -1,15 +1,15 @@
 import { Meta } from '@storybook/html';
-import { verticalLine } from '../index';
-import { createTemplate } from './util';
+import { horizontalLine } from '../../index';
+import { createTemplate } from './../util';
 
 export default {
-	title: 'Example/verticalLine',
+	title: 'Components/horizontalLine',
 } as Meta;
 
-const template = createTemplate(verticalLine);
+const template = createTemplate(horizontalLine);
 
 export const BasicProperties = template({
-	x: 100,
+	y: 100,
 	lineWidth: 1,
 	strokeStyle: 'blue',
 	cursor: 'pointer',

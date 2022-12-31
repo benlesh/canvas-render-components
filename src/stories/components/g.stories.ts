@@ -1,9 +1,9 @@
 import { Meta } from '@storybook/html';
-import { g, rect, img, GProps } from '../index';
-import { createTemplate } from './util';
+import { g, rect, img, GProps } from '../../index';
+import { createTemplate } from '../util';
 
 export default {
-	title: 'Example/g',
+	title: 'Components/g',
 } as Meta;
 
 const template = createTemplate(groupExample);

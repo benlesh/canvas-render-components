@@ -1,9 +1,9 @@
 import { Meta } from '@storybook/html';
-import { line } from '../index';
-import { createTemplate } from './util';
+import { line } from '../../index';
+import { createTemplate } from './../util';
 
 export default {
-	title: 'Example/line',
+	title: 'Components/line',
 } as Meta;
 
 const template = createTemplate(line);

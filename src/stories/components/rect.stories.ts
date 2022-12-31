@@ -1,9 +1,9 @@
 import { Meta } from '@storybook/html';
-import { rect } from '../index';
-import { createTemplate } from './util';
+import { rect } from '../../index';
+import { createTemplate } from './../util';
 
 export default {
-	title: 'Example/rect',
+	title: 'Components/rect',
 } as Meta;
 
 const template = createTemplate(rect);
