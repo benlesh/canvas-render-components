@@ -72,7 +72,9 @@ function CounterComponent() {
 		width: 100,
 		height: 40,
 		label: count.toString(),
-		onClick: () => setCount(count + 1),
+		onClick: () => {
+			setCount((c) => c + 1);
+		},
 	});
 }
 

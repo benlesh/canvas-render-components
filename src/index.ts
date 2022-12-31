@@ -244,6 +244,8 @@ export function crcRef<T>(init?: T): CRCRef<T> {
 	return _componentRefs!.refs[_compnentHookIndex++];
 }
 
+export type StateUpdater<T> = (update: T | ((oldValue: T) => T)) => void;
+
 /**
  * Hook: creates a tuple of state and a state setter. Setting the state with the
  * state setter will cause the entire canvas CRC instance to be scheduled for
@@ -252,7 +254,7 @@ export function crcRef<T>(init?: T): CRCRef<T> {
  * @param init The initial state
  * @returns A tuple with the state, and a setter function
  */
-export function crcState<T>(init?: T): readonly [T, (update: T) => void] {
+export function crcState<T>(init?: T): readonly [T, StateUpdater<T>] {
 	if (_componentIsMounting) {
 		const ref = {
 			type: 'state',
@@ -262,8 +264,11 @@ export function crcState<T>(init?: T): readonly [T, (update: T) => void] {
 
 		const canvas = _canvas;
 
-		function setter(newValue: T) {
-			ref.value = newValue;
+		function setter(newValueOrFactory: T | ((oldValue: T) => T)) {
+			ref.value =
+				typeof newValueOrFactory === 'function'
+					? (newValueOrFactory as any)(ref.value)
+					: newValueOrFactory;
 			update(canvas!);
 		}
 
