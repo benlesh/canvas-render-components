@@ -324,7 +324,7 @@ export function crcWhenChanged(
 	}
 }
 
-interface CRCMouseEvent {
+export interface CRCMouseEvent {
 	x: number;
 	y: number;
 	originalEvent: MouseEvent;

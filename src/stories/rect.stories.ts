@@ -13,8 +13,8 @@ const Template: Story<RectProps> = (args) => {
 	return canvas;
 };
 
-export const BasicProperties = Template.bind({});
-// More on args: https://storybook.js.org/docs/html/writing-stories/args
+export const BasicProperties: Story<RectProps> = Template.bind({});
+
 BasicProperties.args = {
 	x: 10,
 	y: 10,
