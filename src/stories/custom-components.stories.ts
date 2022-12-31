@@ -1,13 +1,5 @@
 import { Story, Meta } from '@storybook/html';
-import {
-	crc,
-	CRCMouseEvent,
-	crcState,
-	defineComp,
-	g,
-	rect,
-	text,
-} from '../index';
+import { crc, CRCMouseEvent, crcState, defineComp, rect, text } from '../index';
 
 export default {
 	title: 'Example/custom-components',
@@ -43,32 +35,30 @@ function CustomButton(props: CustomButtonProps) {
 	const lineWidth = 2;
 	const strokeStyle = state === 'idle' ? 'black' : 'white';
 
-	return g({
-		children: [
-			rect({
-				x,
-				y,
-				width,
-				height,
-				fillStyle,
-				lineWidth,
-				strokeStyle,
-				cursor: 'pointer',
-				onClick: props.onClick,
-				onMouseOver: () => setState('hover'),
-				onMouseOut: () => setState('idle'),
-			}),
-			text({
-				x: x + width / 2,
-				y: y + height / 2,
-				text: props.label,
-				textAlign: 'center',
-				textBaseline: 'middle',
-				fillStyle: strokeStyle,
-				font: '20px Arial',
-			}),
-		],
-	});
+	return [
+		rect({
+			x,
+			y,
+			width,
+			height,
+			fillStyle,
+			lineWidth,
+			strokeStyle,
+			cursor: 'pointer',
+			onClick: props.onClick,
+			onMouseOver: () => setState('hover'),
+			onMouseOut: () => setState('idle'),
+		}),
+		text({
+			x: x + width / 2,
+			y: y + height / 2,
+			text: props.label,
+			textAlign: 'center',
+			textBaseline: 'middle',
+			fillStyle: strokeStyle,
+			font: '20px Arial',
+		}),
+	];
 }
 
 const customButton = defineComp(CustomButton);
