@@ -34,6 +34,8 @@ interface CompRefs<P> {
 	id: string;
 	element: CompEl<P>;
 	refs: any[];
+	abortController: AbortController;
+	imageData?: ImageData;
 }
 
 interface CRCInstance {
@@ -193,14 +195,7 @@ function executeRender(canvas: HTMLCanvasElement, renderTimestamp: number) {
 		render(rootElement, id);
 		for (const id of _unseenIds) {
 			// HACK: I want to be more efficient here, but this is fine for now
-			const compRefs = _currentCRCInstance.refs.get(id);
-			if (compRefs) {
-				for (const ref of compRefs.refs) {
-					if (typeof ref?.teardown === 'function') {
-						ref.teardown();
-					}
-				}
-			}
+			_currentCRCInstance.refs.get(id)?.abortController.abort();
 			_currentCRCInstance.refs.delete(id);
 		}
 	} finally {
@@ -247,6 +242,8 @@ function render<P>(element: CompEl<P>, parentId: string) {
 				id,
 				element,
 				refs: [],
+				abortController: new AbortController(),
+				imageData: undefined,
 			});
 		}
 
@@ -379,6 +376,10 @@ export function crcWhenChanged(
 		const signal = _currentCRCInstance.abortController.signal;
 		if (lastTeardown) {
 			signal.removeEventListener('abort', lastTeardown);
+			_componentRefs.abortController.signal.removeEventListener(
+				'abort',
+				lastTeardown,
+			);
 			lastTeardown();
 		}
 		ref.lastDeps = deps;
@@ -388,6 +389,11 @@ export function crcWhenChanged(
 			signal.addEventListener('abort', newTeardown, {
 				once: true,
 			});
+			_componentRefs.abortController.signal.addEventListener(
+				'abort',
+				newTeardown,
+				{ once: true },
+			);
 		}
 	}
 }
