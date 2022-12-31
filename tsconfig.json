@@ -6,6 +6,7 @@
     "emitDeclarationOnly": true,
     "declaration": true,
     "outDir": "dist/types",
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "allowSyntheticDefaultImports": true
   }
 }
