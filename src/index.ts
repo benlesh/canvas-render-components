@@ -192,6 +192,15 @@ function executeRender(canvas: HTMLCanvasElement, renderTimestamp: number) {
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		render(rootElement, id);
 		for (const id of _unseenIds) {
+			// HACK: I want to be more efficient here, but this is fine for now
+			const compRefs = _currentCRCInstance.refs.get(id);
+			if (compRefs) {
+				for (const ref of compRefs.refs) {
+					if (typeof ref?.teardown === 'function') {
+						ref.teardown();
+					}
+				}
+			}
 			_currentCRCInstance.refs.delete(id);
 		}
 	} finally {
