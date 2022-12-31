@@ -148,6 +148,7 @@ function executeRender(canvas: HTMLCanvasElement) {
 		_unseenIds = new Set(_canvasComponentRefsLookup!.keys());
 		const id = 'root';
 		_unseenIds.delete(id);
+		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		render(rootElement, id);
 		for (const id of _unseenIds) {
 			_canvasComponentRefsLookup.delete(id);
