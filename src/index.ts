@@ -36,16 +36,20 @@ interface CompRefs<P> {
 	refs: any[];
 }
 
+interface CRCInstance {
+	root: CompEl<any>;
+	refs: Map<string, CompRefs<any>>;
+	animationFrameId: number;
+	renderTimestamp: number;
+	abortController: AbortController;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////
 // Shared State
 ////////////////////////////////////////////////////////////////////////////////////////
 
-let refsStore = new WeakMap<HTMLCanvasElement, Map<string, CompRefs<any>>>();
-let roots = new WeakMap<HTMLCanvasElement, CompEl<any>>();
-let renderIds = new WeakMap<HTMLCanvasElement, number>();
-
-let _canvasComponentRefsLookup: Map<string, CompRefs<any>> | undefined =
-	undefined;
+let crcInstances = new Map<HTMLCanvasElement, CRCInstance>();
+let _currentCRCInstance: CRCInstance | undefined = undefined;
 let _componentRefs: CompRefs<any> | undefined = undefined;
 let _canvas: HTMLCanvasElement | undefined = undefined;
 let _componentIsMounting = false;
@@ -74,16 +78,20 @@ function getAnonElemName(fn: any) {
  * DO NOT USE IN PROD
  */
 export function clearSharedState() {
-	refsStore = new WeakMap<HTMLCanvasElement, Map<string, CompRefs<any>>>();
-	roots = new WeakMap<HTMLCanvasElement, CompEl<any>>();
-	renderIds = new WeakMap<HTMLCanvasElement, number>();
+	for (const crcInstance of crcInstances.values()) {
+		cleanupCRCInstace(crcInstance);
+	}
+	crcInstances.clear();
 	anonElementNames = new WeakMap<any, string>();
 	clearTempState();
 }
 
+function cleanupCRCInstace(crcInstance: CRCInstance) {
+	crcInstance.abortController.abort();
+}
+
 function clearTempState() {
 	_unseenIds = undefined;
-	_canvasComponentRefsLookup = undefined;
 	_canvas = undefined;
 	_renderContext = undefined;
 	clearComponentState();
@@ -104,10 +112,38 @@ function clearComponentState() {
  * @param canvas The canvas to render on
  * @param element The CRC element to render
  */
-export function crc<P>(canvas: HTMLCanvasElement, element: CompEl<P>) {
-	if (!refsStore.has(canvas)) {
-		const refs = new Map<string, CompRefs<P>>();
-		refsStore.set(canvas, refs);
+export function crc<P>(
+	canvas: HTMLCanvasElement,
+	element: CompEl<P>,
+	config?: { signal?: AbortSignal },
+) {
+	if (!crcInstances.has(canvas)) {
+		const ac = new AbortController();
+		const signal = config?.signal;
+
+		const cleanup = () => {
+			crcInstances.delete(canvas);
+			ac.abort();
+		};
+
+		if (signal) {
+			config.signal.addEventListener('abort', cleanup, {
+				once: true,
+				signal: ac.signal,
+			});
+		}
+
+		const crcInstance: CRCInstance = {
+			root: element,
+			refs: new Map(),
+			animationFrameId: 0,
+			renderTimestamp: 0,
+			abortController: ac,
+		};
+
+		detectElementRemoval(canvas, cleanup, signal);
+
+		crcInstances.set(canvas, crcInstance);
 	}
 	update(canvas, element);
 }
@@ -137,21 +173,26 @@ export function defineComp<P>(compFn: CompFn<P>) {
  * entry point for rendering the entire tree.
  * @param canvas The canvas to render on
  */
-function executeRender(canvas: HTMLCanvasElement) {
-	renderIds.delete(canvas);
+function executeRender(canvas: HTMLCanvasElement, renderTimestamp: number) {
+	const crcInstance = crcInstances.get(canvas)!;
+	crcInstance.animationFrameId = 0;
+
+	if (crcInstance.abortController.signal.aborted) return;
+
 	try {
+		_currentCRCInstance = crcInstance;
+		_currentCRCInstance.renderTimestamp = renderTimestamp;
 		_canvas = canvas;
-		_canvasComponentRefsLookup = refsStore.get(canvas);
-		const rootElement = roots.get(canvas)!;
+		const rootElement = _currentCRCInstance.root;
 		const ctx = get2dContext(canvas);
 		_renderContext = ctx;
-		_unseenIds = new Set(_canvasComponentRefsLookup!.keys());
+		_unseenIds = new Set(_currentCRCInstance.refs.keys());
 		const id = 'root';
 		_unseenIds.delete(id);
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		render(rootElement, id);
 		for (const id of _unseenIds) {
-			_canvasComponentRefsLookup.delete(id);
+			_currentCRCInstance.refs.delete(id);
 		}
 	} finally {
 		clearTempState();
@@ -164,18 +205,19 @@ function executeRender(canvas: HTMLCanvasElement) {
  * @param element The optional element to update as the root element of that canvas.
  */
 export function update<P>(canvas: HTMLCanvasElement, element?: CompEl<P>) {
-	if (element) {
-		roots.set(canvas, element);
-	}
+	const crcInstance = crcInstances.get(canvas)!;
 
-	if (!roots.has(canvas) || !refsStore.has(canvas)) {
+	if (!crcInstance) {
 		throw new Error('Canvas does not have CRC mounted.');
 	}
 
-	if (!renderIds.has(canvas)) {
-		renderIds.set(
-			canvas,
-			requestAnimationFrame(() => executeRender(canvas)),
+	if (element) {
+		crcInstance.root = element;
+	}
+
+	if (!crcInstance.animationFrameId) {
+		crcInstance.animationFrameId = requestAnimationFrame((ts) =>
+			executeRender(canvas, ts),
 		);
 	}
 }
@@ -190,16 +232,16 @@ function render<P>(element: CompEl<P>, parentId: string) {
 	try {
 		const id = parentId + ':' + getElementTypeName(element);
 		_unseenIds.delete(id);
-		_componentIsMounting = !_canvasComponentRefsLookup!.has(id);
+		_componentIsMounting = !_currentCRCInstance.refs.has(id);
 		if (_componentIsMounting) {
-			_canvasComponentRefsLookup!.set(id, {
+			_currentCRCInstance.refs.set(id, {
 				id,
 				element,
 				refs: [],
 			});
 		}
 
-		_componentRefs = _canvasComponentRefsLookup!.get(id)!;
+		_componentRefs = _currentCRCInstance.refs.get(id)!;
 		_compnentHookIndex = 0;
 
 		const ctx = _renderContext!;
@@ -324,9 +366,20 @@ export function crcWhenChanged(
 	const hookIndex = _compnentHookIndex++;
 	const ref = _componentRefs!.refs[hookIndex];
 	if (!ref.lastDeps || !deps || !shallowArrayEquals(deps, ref.lastDeps)) {
-		ref.teardown?.();
+		const lastTeardown = ref.teardown;
+		const signal = _currentCRCInstance.abortController.signal;
+		if (lastTeardown) {
+			signal.removeEventListener('abort', lastTeardown);
+			lastTeardown();
+		}
 		ref.lastDeps = deps;
-		ref.teardown = callback();
+		const newTeardown = callback();
+		if (newTeardown) {
+			ref.teardown = newTeardown;
+			signal.addEventListener('abort', newTeardown, {
+				once: true,
+			});
+		}
 	}
 }
 
@@ -1316,4 +1369,23 @@ function get2dContext(canvas: HTMLCanvasElement) {
 
 function calculatePixelGridOffset(lineWidth?: number) {
 	return ((lineWidth ?? 0) / 2) % 1;
+}
+
+function detectElementRemoval(
+	element: Element,
+	handler: () => void,
+	signal?: AbortSignal,
+) {
+	const observer = new MutationObserver(() => {
+		if (!document.body.contains(element)) {
+			observer.disconnect();
+			// @ts-ignore
+			element.__crcRemoved = true;
+		}
+	});
+	observer.observe(document.body, { childList: true, subtree: true });
+
+	signal?.addEventListener('abort', () => {
+		observer.disconnect();
+	});
 }
