@@ -1,25 +1,18 @@
-import { Story, Meta } from '@storybook/html';
-import { crc, verticalLine, VerticalLineProps } from '../index';
+import { Meta } from '@storybook/html';
+import { verticalLine } from '../index';
+import { createTemplate } from './util';
 
 export default {
 	title: 'Example/verticalLine',
 } as Meta;
 
-const Template: Story<VerticalLineProps> = (args) => {
-	const canvas = document.createElement('canvas');
-	canvas.width = 500;
-	canvas.height = 500;
-	crc(canvas, verticalLine(args));
-	return canvas;
-};
+const template = createTemplate(verticalLine);
 
-export const BasicProperties = Template.bind({});
-// More on args: https://storybook.js.org/docs/html/writing-stories/args
-BasicProperties.args = {
+export const BasicProperties = template({
 	x: 100,
 	lineWidth: 1,
 	strokeStyle: 'blue',
 	cursor: 'pointer',
 	lineInteractionWidth: 20,
 	alignToPixelGrid: true,
-};
+});

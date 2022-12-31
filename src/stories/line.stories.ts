@@ -1,21 +1,14 @@
-import { Story, Meta } from '@storybook/html';
-import { crc, line, LineProps } from '../index';
+import { Meta } from '@storybook/html';
+import { line } from '../index';
+import { createTemplate } from './util';
 
 export default {
 	title: 'Example/line',
 } as Meta;
 
-const Template: Story<LineProps> = (args) => {
-	const canvas = document.createElement('canvas');
-	canvas.width = 500;
-	canvas.height = 500;
-	crc(canvas, line(args));
-	return canvas;
-};
+const template = createTemplate(line);
 
-export const BasicProperties = Template.bind({});
-// More on args: https://storybook.js.org/docs/html/writing-stories/args
-BasicProperties.args = {
+export const BasicProperties = template({
 	coords: [
 		[0, 0],
 		[100, 100],
@@ -28,4 +21,4 @@ BasicProperties.args = {
 	strokeStyle: 'blue',
 	cursor: 'pointer',
 	lineInteractionWidth: 100,
-};
+});

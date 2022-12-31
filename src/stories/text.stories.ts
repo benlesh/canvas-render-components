@@ -1,21 +1,14 @@
-import { Story, Meta } from '@storybook/html';
-import { crc, text, TextProps } from '../index';
+import { Meta } from '@storybook/html';
+import { text } from '../index';
+import { createTemplate } from './util';
 
 export default {
 	title: 'Example/text',
 } as Meta;
 
-const Template: Story<TextProps> = (args) => {
-	const canvas = document.createElement('canvas');
-	canvas.width = 500;
-	canvas.height = 500;
-	crc(canvas, text(args));
-	return canvas;
-};
+const template = createTemplate(text);
 
-export const BasicProperties: Story<TextProps> = Template.bind({});
-
-BasicProperties.args = {
+export const BasicProperties = template({
 	x: 10,
 	y: 10,
 	maxWidth: 400,
@@ -29,4 +22,4 @@ BasicProperties.args = {
 	cursor: 'pointer',
 	overflow: 'ellipsis',
 	wordWrap: true,
-};
+});

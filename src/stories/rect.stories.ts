@@ -1,21 +1,14 @@
-import { Story, Meta } from '@storybook/html';
-import { crc, rect, RectProps } from '../index';
+import { Meta } from '@storybook/html';
+import { rect } from '../index';
+import { createTemplate } from './util';
 
 export default {
 	title: 'Example/rect',
 } as Meta;
 
-const Template: Story<RectProps> = (args) => {
-	const canvas = document.createElement('canvas');
-	canvas.width = 500;
-	canvas.height = 500;
-	crc(canvas, rect(args));
-	return canvas;
-};
+const template = createTemplate(rect);
 
-export const BasicProperties: Story<RectProps> = Template.bind({});
-
-BasicProperties.args = {
+export const BasicProperties = template({
 	x: 10,
 	y: 10,
 	width: 100,
@@ -24,4 +17,4 @@ BasicProperties.args = {
 	lineWidth: 2,
 	strokeStyle: 'blue',
 	cursor: 'pointer',
-};
+});

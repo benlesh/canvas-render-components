@@ -1,21 +1,17 @@
 import { Story, Meta } from '@storybook/html';
 import { crc, CRCMouseEvent, crcState, defineComp, rect, text } from '../index';
+import { createTemplate } from './util';
 
 export default {
 	title: 'Example/custom-components',
 } as Meta;
 
-const Template: Story<{}> = (args) => {
-	const canvas = document.createElement('canvas');
-	canvas.width = 500;
-	canvas.height = 500;
-	crc(canvas, counterComponent(args));
-	return canvas;
-};
+const customButton = defineComp(CustomButton);
+const counterComponent = defineComp<{}>(CounterComponent);
 
-export const CounterComponentExample: Story<{}> = Template.bind({});
+const template = createTemplate(counterComponent);
 
-CounterComponentExample.args = {};
+export const CounterComponentExample = template({});
 
 interface CustomButtonProps {
 	x: number;
@@ -61,8 +57,6 @@ function CustomButton(props: CustomButtonProps) {
 	];
 }
 
-const customButton = defineComp(CustomButton);
-
 function CounterComponent() {
 	const [count, setCount] = crcState(0);
 
@@ -77,5 +71,3 @@ function CounterComponent() {
 		},
 	});
 }
-
-const counterComponent = defineComp(CounterComponent);

@@ -862,8 +862,12 @@ function Rect(props: RectProps, ctx: CanvasRenderingContext2D) {
  */
 export const rect = defineComp(Rect);
 
-export interface LineProps extends CRCBasicMouseEvents, StrokeStyleProps {
+export interface LineProps
+	extends CRCBasicMouseEvents,
+		CursorStyleProps,
+		StrokeStyleProps {
 	coords: [number, number][];
+	lineInteractionWidth?: number;
 }
 
 function Line(props: LineProps, ctx: CanvasRenderingContext2D) {
@@ -886,11 +890,13 @@ export const line = defineComp(Line);
 
 export interface VerticalLineProps
 	extends CRCBasicMouseEvents,
+		CursorStyleProps,
 		StrokeStyleProps {
 	x: number;
 	top?: number;
 	bottom?: number;
 	alignToPixelGrid?: boolean;
+	lineInteractionWidth?: number;
 }
 
 function VerticalLine(props: VerticalLineProps, ctx: CanvasRenderingContext2D) {
@@ -924,11 +930,13 @@ export const verticalLine = defineComp(VerticalLine);
 
 export interface HorizontalLineProps
 	extends CRCBasicMouseEvents,
+		CursorStyleProps,
 		StrokeStyleProps {
 	y: number;
 	left?: number;
 	right?: number;
 	alignToPixelGrid?: boolean;
+	lineInteractionWidth?: number;
 }
 
 function HorizontalLine(
