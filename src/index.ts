@@ -653,7 +653,10 @@ export function crcRectPath(
  * Creates a memoized Path2D for a set of line coordinates.
  * @returns A memoized Path2D
  */
-export function crcLinePath(coords: [number, number][]): Path2D {
+export function crcLinePath(
+	coords: [number, number][],
+	config?: { closePath?: boolean },
+): Path2D {
 	return crcMemo(() => {
 		const path = new Path2D();
 		for (let i = 0; i < coords.length; i++) {
@@ -663,6 +666,9 @@ export function crcLinePath(coords: [number, number][]): Path2D {
 			} else {
 				path.lineTo(x, y);
 			}
+		}
+		if (config?.closePath) {
+			path.closePath();
 		}
 		return path;
 	}, coords.flat());
