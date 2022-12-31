@@ -1,5 +1,5 @@
-import { Story, Meta } from '@storybook/html';
-import { crc, CRCMouseEvent, crcState, defineComp, rect, text } from '../index';
+import { Meta } from '@storybook/html';
+import { CRCMouseEvent, crcState, defineComp, rect, text } from '../index';
 import { createTemplate } from './util';
 
 export default {
