@@ -27,15 +27,17 @@ export interface CompEl<P = any> {
 
 export type CompFn<P> = (
 	props: P,
-	ctx: CanvasRenderingContext2D,
+	ctx: OffscreenCanvasRenderingContext2D,
 ) => CompEl[] | CompEl | void;
 
 interface CompRefs<P> {
 	id: string;
+	parent: CompRefs<any> | undefined;
 	element: CompEl<P>;
 	refs: any[];
 	abortController: AbortController;
-	imageData?: ImageData;
+	offscreenCanvas: OffscreenCanvas;
+	isDirty: boolean;
 }
 
 interface CRCInstance {
@@ -147,7 +149,7 @@ export function crc<P>(
 
 		crcInstances.set(canvas, crcInstance);
 	}
-	update(canvas, element);
+	update(canvas);
 }
 
 /**
@@ -192,7 +194,7 @@ function executeRender(canvas: HTMLCanvasElement, renderTimestamp: number) {
 		const id = 'root';
 		_unseenIds.delete(id);
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
-		render(rootElement, id);
+		ctx.drawImage(render(rootElement, id, undefined), 0, 0);
 		for (const id of _unseenIds) {
 			// HACK: I want to be more efficient here, but this is fine for now
 			_currentCRCInstance.refs.get(id)?.abortController.abort();
@@ -203,20 +205,23 @@ function executeRender(canvas: HTMLCanvasElement, renderTimestamp: number) {
 	}
 }
 
+function markDirty(compRefs: CompRefs<any>) {
+	while (compRefs) {
+		compRefs.isDirty = true;
+		compRefs = compRefs.parent;
+	}
+}
+
 /**
  *
  * @param canvas The canvas with CRC mounted on it to update
  * @param element The optional element to update as the root element of that canvas.
  */
-export function update<P>(canvas: HTMLCanvasElement, element?: CompEl<P>) {
+export function update<P>(canvas: HTMLCanvasElement) {
 	const crcInstance = crcInstances.get(canvas)!;
 
 	if (!crcInstance) {
 		throw new Error('Canvas does not have CRC mounted.');
-	}
-
-	if (element) {
-		crcInstance.root = element;
 	}
 
 	if (!crcInstance.animationFrameId) {
@@ -232,38 +237,68 @@ function getElementTypeName(element: CompEl) {
 	);
 }
 
-function render<P>(element: CompEl<P>, parentId: string) {
+function render<P>(
+	element: CompEl<P>,
+	parentId: string,
+	parent: CompRefs<any> | undefined,
+): OffscreenCanvas {
 	try {
 		const id = parentId + ':' + getElementTypeName(element);
 		_unseenIds.delete(id);
+
+		const { width, height } = _canvas;
+
 		_componentIsMounting = !_currentCRCInstance.refs.has(id);
 		if (_componentIsMounting) {
 			_currentCRCInstance.refs.set(id, {
 				id,
+				parent,
 				element,
 				refs: [],
 				abortController: new AbortController(),
-				imageData: undefined,
+				offscreenCanvas: new OffscreenCanvas(width, height),
+				isDirty: true,
 			});
 		}
 
 		_componentRefs = _currentCRCInstance.refs.get(id)!;
 		_compnentHookIndex = 0;
+		const { offscreenCanvas } = _componentRefs;
 
-		const ctx = _renderContext!;
-		ctx.save();
-		const result = element.type(element.props, ctx);
-		if (result) {
-			if (Array.isArray(result)) {
-				for (let i = 0; i < result.length; i++) {
-					const child = result[i];
-					render(child, id + ':' + i);
+		if (
+			_componentIsMounting ||
+			_componentRefs.isDirty ||
+			offscreenCanvas.width !== width ||
+			offscreenCanvas.height !== height ||
+			!shallowEqual(_componentRefs.element.props, element.props)
+		) {
+			_componentRefs.element = element;
+			offscreenCanvas.width = width;
+			offscreenCanvas.height = height;
+			const ctx = offscreenCanvas.getContext('2d')!;
+
+			const result = _componentRefs.element.type(
+				_componentRefs.element.props,
+				ctx,
+			);
+
+			_componentRefs.isDirty = false;
+
+			if (result) {
+				if (Array.isArray(result)) {
+					for (let i = 0; i < result.length; i++) {
+						const child = result[i];
+						ctx.drawImage(render(child, id + ':' + i, _componentRefs), 0, 0);
+					}
+				} else {
+					ctx.drawImage(render(result, id, _componentRefs), 0, 0);
 				}
-			} else {
-				render(result, id);
 			}
+		} else {
+			return offscreenCanvas;
 		}
-		ctx.restore();
+
+		return offscreenCanvas;
 	} finally {
 		clearComponentState();
 	}
@@ -312,12 +347,14 @@ export function crcState<T>(init?: T): readonly [T, StateUpdater<T>] {
 		};
 
 		const canvas = _canvas;
+		const compRefs = _componentRefs!;
 
 		function setter(newValueOrFactory: T | ((oldValue: T) => T)) {
 			ref.value =
 				typeof newValueOrFactory === 'function'
 					? (newValueOrFactory as any)(ref.value)
 					: newValueOrFactory;
+			markDirty(compRefs);
 			update(canvas!);
 		}
 
@@ -793,7 +830,7 @@ export interface PathProps
 	lineInteractionWidth?: number;
 }
 
-function Path(props: PathProps, ctx: CanvasRenderingContext2D) {
+function Path(props: PathProps, ctx: OffscreenCanvasRenderingContext2D) {
 	const {
 		alpha,
 		path,
@@ -920,7 +957,7 @@ function wireCommonEvents(
 	}
 }
 
-function Rect(props: RectProps, ctx: CanvasRenderingContext2D) {
+function Rect(props: RectProps, ctx: OffscreenCanvasRenderingContext2D) {
 	const { x, y, width, height, ...pathProps } = props;
 	const rectPath = crcRectPath(x, y, width, height);
 	return Path(
@@ -945,7 +982,7 @@ export interface LineProps
 	lineInteractionWidth?: number;
 }
 
-function Line(props: LineProps, ctx: CanvasRenderingContext2D) {
+function Line(props: LineProps, ctx: OffscreenCanvasRenderingContext2D) {
 	const { coords, ...pathProps } = props;
 	const linePath = crcLinePath(coords);
 
@@ -974,7 +1011,10 @@ export interface VerticalLineProps
 	lineInteractionWidth?: number;
 }
 
-function VerticalLine(props: VerticalLineProps, ctx: CanvasRenderingContext2D) {
+function VerticalLine(
+	props: VerticalLineProps,
+	ctx: OffscreenCanvasRenderingContext2D,
+) {
 	const {
 		x: initialX,
 		top = 0,
@@ -1016,7 +1056,7 @@ export interface HorizontalLineProps
 
 function HorizontalLine(
 	props: HorizontalLineProps,
-	ctx: CanvasRenderingContext2D,
+	ctx: OffscreenCanvasRenderingContext2D,
 ) {
 	const {
 		y: initialY,
@@ -1058,7 +1098,7 @@ export interface ImgProps
 	height?: number;
 }
 
-function Img(props: ImgProps, ctx: CanvasRenderingContext2D) {
+function Img(props: ImgProps, ctx: OffscreenCanvasRenderingContext2D) {
 	let {
 		alpha,
 		src,
@@ -1124,7 +1164,7 @@ export interface SvgPathProps
 	d: string;
 }
 
-function SvgPath(props: SvgPathProps, ctx: CanvasRenderingContext2D) {
+function SvgPath(props: SvgPathProps, ctx: OffscreenCanvasRenderingContext2D) {
 	const { d, ...pathProps } = props;
 	const svgPath = crcSvgPath(d);
 	return Path(
@@ -1153,7 +1193,7 @@ export interface GProps {
 	skewY?: number;
 }
 
-function G(props: GProps, ctx: CanvasRenderingContext2D) {
+function G(props: GProps, ctx: OffscreenCanvasRenderingContext2D) {
 	let transform = new DOMMatrix();
 
 	const { scaleX = 1, scaleY = 1 } = props;
@@ -1209,7 +1249,7 @@ export interface TextProps
 	textAlign?: CanvasTextAlign;
 }
 
-export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
+export function Text(props: TextProps, ctx: OffscreenCanvasRenderingContext2D) {
 	const {
 		font = '13px sans-serif',
 		textBaseline = 'top',
@@ -1259,13 +1299,6 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 		while (words.length) {
 			const currentYOffset = lineCount * lineHeight;
 			const nextYOffset = currentYOffset + lineHeight;
-			console.log({
-				words: Array.from(words),
-				maxHeight,
-				nextYOffset,
-				lineCount,
-				line,
-			});
 			if (maxHeight < nextYOffset + lineHeight) {
 				const remaining = words.join(' ');
 				const lastLine =
@@ -1307,7 +1340,7 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 export const text = defineComp(Text);
 
 function getEllipsisText(
-	renderContext: CanvasRenderingContext2D,
+	renderContext: { measureText(text: string): TextMetrics },
 	text: string,
 	maxWidth: number,
 ) {
@@ -1336,7 +1369,7 @@ function getEllipsisText(
 }
 
 function isTextTooWide(
-	renderContext: CanvasRenderingContext2D,
+	renderContext: { measureText(text: string): TextMetrics },
 	text: string,
 	maxWidth: number,
 ) {
@@ -1403,4 +1436,21 @@ function detectElementRemoval(
 	signal?.addEventListener('abort', () => {
 		observer.disconnect();
 	});
+}
+
+function shallowEqual<P>(obj1: P, obj2: P): boolean {
+	const obj1Keys = Object.keys(obj1);
+	const obj2Keys = Object.keys(obj2);
+
+	if (obj1Keys.length !== obj2Keys.length) {
+		return false;
+	}
+
+	for (const key of obj1Keys) {
+		if (obj1[key] !== obj2[key]) {
+			return false;
+		}
+	}
+
+	return true;
 }
