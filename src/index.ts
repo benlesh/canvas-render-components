@@ -57,7 +57,7 @@ let _currentCRCInstance: CRCInstance | undefined = undefined;
 let _componentRefs: CompRefs<any> | undefined = undefined;
 let _canvas: HTMLCanvasElement | undefined = undefined;
 let _componentIsMounting = false;
-let _compnentHookIndex = 0;
+let _componentHookIndex = 0;
 let _renderContext: CanvasRenderingContext2D | undefined = undefined;
 let _unseenIds: Set<string> | undefined = undefined;
 
@@ -83,14 +83,14 @@ function getAnonElemName(fn: any) {
  */
 export function clearSharedState() {
 	for (const crcInstance of crcInstances.values()) {
-		cleanupCRCInstace(crcInstance);
+		cleanupCRCInstance(crcInstance);
 	}
 	crcInstances.clear();
 	anonElementNames = new WeakMap<any, string>();
 	clearTempState();
 }
 
-function cleanupCRCInstace(crcInstance: CRCInstance) {
+function cleanupCRCInstance(crcInstance: CRCInstance) {
 	crcInstance.abortController.abort();
 }
 
@@ -104,7 +104,7 @@ function clearTempState() {
 function clearComponentState() {
 	_componentRefs = undefined;
 	_componentIsMounting = false;
-	_compnentHookIndex = 0;
+	_componentHookIndex = 0;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -155,7 +155,7 @@ export function crc<P>(
 /**
  * Creates a simple structure representing a component to be rendered.
  * DOES NOT RENDER.
- * @param comp Ther render function for a component
+ * @param comp The render function for a component
  * @param props The props to pass to that render function on render
  * @returns A structure that represents a component to be mounted or updated during render
  */
@@ -262,7 +262,7 @@ function render<P>(
 		}
 
 		_componentRefs = _currentCRCInstance.refs.get(id)!;
-		_compnentHookIndex = 0;
+		_componentHookIndex = 0;
 		const { offscreenCanvas } = _componentRefs;
 
 		if (
@@ -325,7 +325,7 @@ export function crcRef<T>(init?: T): CRCRef<T> {
 		});
 	}
 
-	return _componentRefs!.refs[_compnentHookIndex++];
+	return _componentRefs!.refs[_componentHookIndex++];
 }
 
 export type StateUpdater<T> = (update: T | ((oldValue: T) => T)) => void;
@@ -361,7 +361,7 @@ export function crcState<T>(init?: T): readonly [T, StateUpdater<T>] {
 		_componentRefs!.refs.push(ref);
 	}
 
-	const ref = _componentRefs!.refs[_compnentHookIndex++];
+	const ref = _componentRefs!.refs[_componentHookIndex++];
 	return [ref.value, ref.setter] as const;
 }
 
@@ -406,7 +406,7 @@ export function crcWhenChanged(
 		_componentRefs!.refs.push(ref);
 	}
 
-	const hookIndex = _compnentHookIndex++;
+	const hookIndex = _componentHookIndex++;
 	const ref = _componentRefs!.refs[hookIndex];
 	if (!ref.lastDeps || !deps || !shallowArrayEquals(deps, ref.lastDeps)) {
 		const lastTeardown = ref.teardown;
