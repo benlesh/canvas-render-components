@@ -1,6 +1,12 @@
 # Canvas Render Components (alpha)
 
-Super duper alpha.. Use at your own risk. lol
+**Super duper alpha.. Use at your own risk. lol**
+
+The basic idea here is a "react-like" API that will create canvas "components" such that it handles:
+
+1. Events over very specific areas of of the canvas, as defined by components.
+2. Communicating state changes between components.
+3. Ensuring that only what needs to be rendered is actually rendered.
 
 There's a [playground link here on Stackblitz](https://stackblitz.com/fork/canvas-render-components).
 
