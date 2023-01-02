@@ -10,6 +10,19 @@ The basic idea here is a "react-like" API that will create canvas "components" s
 
 There's a [playground link here on Stackblitz](https://stackblitz.com/fork/canvas-render-components).
 
+## Rendering Only What Matters
+
+Think of each component as a unit of render. Each component will only render if:
+
+1. It's being "mounted" (rendered for the first time)
+2. The canvas has changed size
+3. The props of the component have changed
+4. The component has been marked "dirty" due to a state change in itself or one of its descendants.
+
+If none of the above are true, a cached image will be rendered in its place, and the component's render function will not be called at all. This is done with `OffscreenCanvas` instances for each component. As of right now, this library is experimental, and I'm not even sure how much of a benefit this will be for performance. The primary driver here is because compnents may have a lot of additional logic in their render functions, including things like hooks, etc, it's generally good to avoid executing that if you don't have to. The general idea is that this will benefit performance.
+
+Note that if you really want "high performance" canvas rendering, you're best off just writing a function that does all of your canvas rendering, and not using _anyone's_ library. Full stop. Less code is always going to perform better. However, this library should still yield really good performance, it might just not be something you want ot use for a game loop (yet).. Time will tell, I suppose.
+
 ## Known Issues and Missing Features
 
 - **THERE ARE NO TESTS!! (duh, huge red flag!)**
