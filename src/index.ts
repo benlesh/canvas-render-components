@@ -25,18 +25,21 @@ export interface CompEl<P = any> {
 	props: P;
 }
 
+type FalsyNodes = undefined | false | null | '' | 0;
+
+export type CRCNode = CompEl | void | FalsyNodes;
+
 export type CompFn<P> = (
 	props: P,
-	ctx: OffscreenCanvasRenderingContext2D,
-) => CompEl[] | CompEl | void;
+	ctx: CanvasRenderingContext2D,
+) => CRCNode[] | CRCNode | void;
 
 interface CompRefs<P> {
 	id: string;
 	parent: CompRefs<any> | undefined;
 	element: CompEl<P>;
 	refs: any[];
-	abortController: AbortController;
-	offscreenCanvas: OffscreenCanvas;
+	teardowns: Teardowns;
 	isDirty: boolean;
 }
 
@@ -45,12 +48,46 @@ interface CRCInstance {
 	refs: Map<string, CompRefs<any>>;
 	animationFrameId: number;
 	renderTimestamp: number;
-	abortController: AbortController;
+	mainTeardowns: Teardowns;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Shared State
 ////////////////////////////////////////////////////////////////////////////////////////
+const multicastEventHandlers = new WeakMap<
+	HTMLElement,
+	Map<string, Set<(e: any) => void>>
+>();
+
+function multicastEvent(
+	target: HTMLElement,
+	type: string,
+	handler: (e: any) => void,
+) {
+	if (!multicastEventHandlers.has(target)) {
+		multicastEventHandlers.set(target, new Map());
+	}
+	const events = multicastEventHandlers.get(target)!;
+	if (!events.has(type)) {
+		const handlers = new Set<typeof handler>();
+		events.set(type, handlers);
+		target.addEventListener(type, (e) => {
+			for (const handler of handlers) {
+				try {
+					handler(e);
+				} catch (err) {
+					reportError(err);
+				}
+			}
+		});
+	}
+	const handlers = events.get(type)!;
+	handlers.add(handler);
+
+	return () => {
+		handlers.delete(handler);
+	};
+}
 
 let crcInstances = new Map<HTMLCanvasElement, CRCInstance>();
 let _currentCRCInstance: CRCInstance | undefined = undefined;
@@ -91,7 +128,7 @@ export function clearSharedState() {
 }
 
 function cleanupCRCInstance(crcInstance: CRCInstance) {
-	crcInstance.abortController.abort();
+	crcInstance.mainTeardowns.execute();
 }
 
 function clearTempState() {
@@ -122,18 +159,21 @@ export function crc<P>(
 	config?: { signal?: AbortSignal },
 ) {
 	if (!crcInstances.has(canvas)) {
-		const ac = new AbortController();
+		const mainTeardowns = new Teardowns();
+
 		const signal = config?.signal;
 
 		const cleanup = () => {
 			crcInstances.delete(canvas);
-			ac.abort();
+			mainTeardowns.execute();
 		};
 
 		if (signal) {
-			config.signal.addEventListener('abort', cleanup, {
+			signal.addEventListener('abort', cleanup, {
 				once: true,
-				signal: ac.signal,
+			});
+			mainTeardowns.add(() => {
+				signal.removeEventListener('abort', cleanup);
 			});
 		}
 
@@ -142,14 +182,13 @@ export function crc<P>(
 			refs: new Map(),
 			animationFrameId: 0,
 			renderTimestamp: 0,
-			abortController: ac,
+			mainTeardowns,
 		};
-
-		detectElementRemoval(canvas, cleanup, signal);
 
 		crcInstances.set(canvas, crcInstance);
 	}
-	update(canvas);
+
+	update(canvas, element);
 }
 
 /**
@@ -177,27 +216,44 @@ export function defineComp<P>(compFn: CompFn<P>) {
  * entry point for rendering the entire tree.
  * @param canvas The canvas to render on
  */
-function executeRender(canvas: HTMLCanvasElement, renderTimestamp: number) {
-	const crcInstance = crcInstances.get(canvas)!;
+function executeRender(
+	canvas: HTMLCanvasElement,
+	renderTimestamp: number,
+	updatedRoot?: CompEl,
+) {
+	if (!canvas) {
+		throw new Error('No canvas element provided');
+	}
+
+	const crcInstance = crcInstances.get(canvas);
+
+	if (!crcInstance) {
+		throw new Error('CRC is not mounted on this element');
+	}
+
 	crcInstance.animationFrameId = 0;
 
-	if (crcInstance.abortController.signal.aborted) return;
+	if (crcInstance.mainTeardowns.closed) return;
 
 	try {
 		_currentCRCInstance = crcInstance;
 		_currentCRCInstance.renderTimestamp = renderTimestamp;
 		_canvas = canvas;
-		const rootElement = _currentCRCInstance.root;
+		const rootElement = updatedRoot ?? _currentCRCInstance.root;
+		_currentCRCInstance.root = rootElement;
 		const ctx = get2dContext(canvas);
 		_renderContext = ctx;
+
 		_unseenIds = new Set(_currentCRCInstance.refs.keys());
 		const id = 'root';
 		_unseenIds.delete(id);
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
-		ctx.drawImage(render(rootElement, id, undefined), 0, 0);
+
+		render(rootElement, id, undefined);
+
 		for (const id of _unseenIds) {
 			// HACK: I want to be more efficient here, but this is fine for now
-			_currentCRCInstance.refs.get(id)?.abortController.abort();
+			_currentCRCInstance.refs.get(id)?.teardowns.execute();
 			_currentCRCInstance.refs.delete(id);
 		}
 	} finally {
@@ -206,9 +262,10 @@ function executeRender(canvas: HTMLCanvasElement, renderTimestamp: number) {
 }
 
 function markDirty(compRefs: CompRefs<any>) {
-	while (compRefs) {
-		compRefs.isDirty = true;
-		compRefs = compRefs.parent;
+	let node: CompRefs<any> | undefined = compRefs;
+	while (node) {
+		node.isDirty = true;
+		node = node.parent;
 	}
 }
 
@@ -217,7 +274,7 @@ function markDirty(compRefs: CompRefs<any>) {
  * @param canvas The canvas with CRC mounted on it to update
  * @param element The optional element to update as the root element of that canvas.
  */
-export function update<P>(canvas: HTMLCanvasElement) {
+export function update<P>(canvas: HTMLCanvasElement, rootElement?: CompEl) {
 	const crcInstance = crcInstances.get(canvas)!;
 
 	if (!crcInstance) {
@@ -226,7 +283,7 @@ export function update<P>(canvas: HTMLCanvasElement) {
 
 	if (!crcInstance.animationFrameId) {
 		crcInstance.animationFrameId = requestAnimationFrame((ts) =>
-			executeRender(canvas, ts),
+			executeRender(canvas, ts, rootElement),
 		);
 	}
 }
@@ -241,64 +298,53 @@ function render<P>(
 	element: CompEl<P>,
 	parentId: string,
 	parent: CompRefs<any> | undefined,
-): OffscreenCanvas {
+): void {
 	try {
 		const id = parentId + ':' + getElementTypeName(element);
-		_unseenIds.delete(id);
+		_unseenIds!.delete(id);
 
-		const { width, height } = _canvas;
-
-		_componentIsMounting = !_currentCRCInstance.refs.has(id);
+		_componentIsMounting = !_currentCRCInstance!.refs.has(id);
 		if (_componentIsMounting) {
-			_currentCRCInstance.refs.set(id, {
+			const teardowns = new Teardowns();
+			teardowns.follow(_currentCRCInstance!.mainTeardowns);
+			_currentCRCInstance!.refs.set(id, {
 				id,
 				parent,
 				element,
 				refs: [],
-				abortController: new AbortController(),
-				offscreenCanvas: new OffscreenCanvas(width, height),
+				teardowns,
 				isDirty: true,
 			});
 		}
 
-		_componentRefs = _currentCRCInstance.refs.get(id)!;
+		_componentRefs = _currentCRCInstance!.refs.get(id)!;
 		_componentHookIndex = 0;
-		const { offscreenCanvas } = _componentRefs;
 
-		if (
-			_componentIsMounting ||
-			_componentRefs.isDirty ||
-			offscreenCanvas.width !== width ||
-			offscreenCanvas.height !== height ||
-			!shallowEqual(_componentRefs.element.props, element.props)
-		) {
-			_componentRefs.element = element;
-			offscreenCanvas.width = width;
-			offscreenCanvas.height = height;
-			const ctx = offscreenCanvas.getContext('2d')!;
+		_componentRefs.element = element;
 
-			const result = _componentRefs.element.type(
-				_componentRefs.element.props,
-				ctx,
-			);
+		const ctx = _renderContext!;
+		ctx.save();
+		const result = _componentRefs.element.type(
+			_componentRefs.element.props,
+			ctx,
+		);
 
-			_componentRefs.isDirty = false;
+		_componentRefs.isDirty = false;
 
-			if (result) {
-				if (Array.isArray(result)) {
-					for (let i = 0; i < result.length; i++) {
-						const child = result[i];
-						ctx.drawImage(render(child, id + ':' + i, _componentRefs), 0, 0);
+		if (result) {
+			if (Array.isArray(result)) {
+				for (let i = 0; i < result.length; i++) {
+					const child = result[i];
+					if (child) {
+						render(child, id + ':' + i, _componentRefs);
 					}
-				} else {
-					ctx.drawImage(render(result, id, _componentRefs), 0, 0);
 				}
+			} else {
+				render(result, id, _componentRefs);
 			}
-		} else {
-			return offscreenCanvas;
 		}
 
-		return offscreenCanvas;
+		ctx.restore();
 	} finally {
 		clearComponentState();
 	}
@@ -410,27 +456,18 @@ export function crcWhenChanged(
 	const ref = _componentRefs!.refs[hookIndex];
 	if (!ref.lastDeps || !deps || !shallowArrayEquals(deps, ref.lastDeps)) {
 		const lastTeardown = ref.teardown;
-		const signal = _currentCRCInstance.abortController.signal;
+		const mainTeardowns = _currentCRCInstance!.mainTeardowns;
 		if (lastTeardown) {
-			signal.removeEventListener('abort', lastTeardown);
-			_componentRefs.abortController.signal.removeEventListener(
-				'abort',
-				lastTeardown,
-			);
+			mainTeardowns.add(lastTeardown);
+			_componentRefs!.teardowns.remove(lastTeardown);
 			lastTeardown();
 		}
 		ref.lastDeps = deps;
 		const newTeardown = callback();
 		if (newTeardown) {
 			ref.teardown = newTeardown;
-			signal.addEventListener('abort', newTeardown, {
-				once: true,
-			});
-			_componentRefs.abortController.signal.addEventListener(
-				'abort',
-				newTeardown,
-				{ once: true },
-			);
+			mainTeardowns.add(newTeardown);
+			_componentRefs!.teardowns.add(newTeardown);
 		}
 	}
 }
@@ -459,17 +496,22 @@ function isHit({
 	lineInteractionWidth: number;
 }) {
 	const ctx = get2dContext(canvas);
-	ctx.setTransform(transform);
-	if (fill && ctx.isPointInPath(path, x, y)) {
-		return true;
-	}
-	if (lineInteractionWidth > 0) {
-		ctx.lineWidth = lineInteractionWidth;
-		if (ctx.isPointInStroke(path, x, y)) {
+	ctx.save();
+	try {
+		ctx.setTransform(transform);
+		if (fill && ctx.isPointInPath(path, x, y)) {
 			return true;
 		}
+		if (lineInteractionWidth > 0) {
+			ctx.lineWidth = lineInteractionWidth;
+			if (ctx.isPointInStroke(path, x, y)) {
+				return true;
+			}
+		}
+		return false;
+	} finally {
+		ctx.restore();
 	}
-	return false;
 }
 
 function crcBasicMouseEvent({
@@ -479,31 +521,29 @@ function crcBasicMouseEvent({
 	fill = false,
 	lineInteractionWidth = 0,
 }: {
-	type: 'click' | 'dblclick' | 'mousemove' | 'contextmenu';
+	type:
+		| 'click'
+		| 'dblclick'
+		| 'mousemove'
+		| 'contextmenu'
+		| 'mousedown'
+		| 'mouseup';
 	path: Path2D;
 	handler: (e: CRCMouseEvent) => void;
 	fill?: boolean;
 	lineInteractionWidth?: number;
 }) {
 	crcWhenChanged(() => {
-		const ac = new AbortController();
 		const transform = _renderContext!.getTransform();
-		_canvas!.addEventListener(
-			type,
-			(e) => {
-				const canvas = e.target as HTMLCanvasElement;
-				const [x, y] = getMouseCoordinates(e);
-				if (
-					isHit({ canvas, path, x, y, fill, transform, lineInteractionWidth })
-				) {
-					handler({ x, y, originalEvent: e });
-				}
-			},
-			{ signal: ac.signal },
-		);
-		return () => {
-			ac.abort();
-		};
+		return multicastEvent(_canvas!, type, (e) => {
+			const canvas = e.target as HTMLCanvasElement;
+			const [x, y] = getMouseCoordinates(e);
+			if (
+				isHit({ canvas, path, x, y, fill, transform, lineInteractionWidth })
+			) {
+				handler({ x, y, originalEvent: e });
+			}
+		});
 	}, [type, path, handler, fill, lineInteractionWidth]);
 }
 
@@ -579,6 +619,30 @@ export function crcMouseMove(config: {
 	});
 }
 
+export function crcMouseDown(config: {
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineInteractionWidth?: number;
+}) {
+	crcBasicMouseEvent({
+		...config,
+		type: 'mousedown',
+	});
+}
+
+export function crcMouseUp(config: {
+	path: Path2D;
+	handler: (e: CRCMouseEvent) => void;
+	fill?: boolean;
+	lineInteractionWidth?: number;
+}) {
+	crcBasicMouseEvent({
+		...config,
+		type: 'mouseup',
+	});
+}
+
 /**
  * Hook: For wiring up mouse over events that correspond to a given Path.
  * NOTE: If the path reference changes between, the click event will be
@@ -634,67 +698,58 @@ function crcMouseOverOrOut({
 		const ac = new AbortController();
 		const transform = _renderContext!.getTransform();
 
-		_canvas!.addEventListener(
-			'mousemove',
-			(e) => {
-				const canvas = e.target as HTMLCanvasElement;
-				const [x, y] = getMouseCoordinates(e);
+		const teardownMouseMoves = multicastEvent(_canvas!, 'mousemove', (e) => {
+			const canvas = e.target as HTMLCanvasElement;
+			const [x, y] = getMouseCoordinates(e);
 
-				const isOver = isHit({
-					canvas,
-					transform,
-					path,
-					x,
-					y,
-					fill,
-					lineInteractionWidth,
-				});
+			const isOver = isHit({
+				canvas,
+				transform,
+				path,
+				x,
+				y,
+				fill,
+				lineInteractionWidth,
+			});
 
-				const wasOver = overRef.current;
-				if (isOver) {
-					overRef.current = true;
-					if (type === 'mouseover' && !wasOver) {
-						handler({
-							x,
-							y,
-							originalEvent: e,
-						});
-					}
-				} else {
-					overRef.current = false;
-					if (type === 'mouseout' && wasOver) {
-						handler({
-							x,
-							y,
-							originalEvent: e,
-						});
-					}
-				}
-			},
-			{
-				signal: ac.signal,
-			},
-		);
-
-		_canvas!.addEventListener(
-			'mouseout',
-			(e) => {
-				overRef.current = false;
-				if (type === 'mouseout') {
-					const [x, y] = getMouseCoordinates(e);
+			const wasOver = overRef.current;
+			if (isOver) {
+				overRef.current = true;
+				if (type === 'mouseover' && !wasOver) {
 					handler({
 						x,
 						y,
 						originalEvent: e,
 					});
 				}
-			},
-			{
-				signal: ac.signal,
-			},
-		);
+			} else {
+				overRef.current = false;
+				if (type === 'mouseout' && wasOver) {
+					handler({
+						x,
+						y,
+						originalEvent: e,
+					});
+				}
+			}
+		});
 
-		return () => ac.abort();
+		const teardownMouseOuts = multicastEvent(_canvas!, 'mouseout', (e) => {
+			overRef.current = false;
+			if (type === 'mouseout') {
+				const [x, y] = getMouseCoordinates(e);
+				handler({
+					x,
+					y,
+					originalEvent: e,
+				});
+			}
+		});
+
+		return () => {
+			teardownMouseMoves();
+			teardownMouseOuts();
+		};
 	}, [type, path, handler, fill, lineInteractionWidth]);
 }
 
@@ -798,10 +853,16 @@ export interface CRCBasicMouseEvents {
 	onMouseOver?: (e: CRCMouseEvent) => void;
 	onMouseOut?: (e: CRCMouseEvent) => void;
 	onContextMenu?: (e: CRCMouseEvent) => void;
+	onMouseDown?: (e: CRCMouseEvent) => void;
+	onMouseUp?: (e: CRCMouseEvent) => void;
 }
 
-type FillStyle = CanvasRenderingContext2D['fillStyle'];
-type StrokeStyle = CanvasRenderingContext2D['strokeStyle'];
+export type FillStyle = CanvasRenderingContext2D['fillStyle'];
+export type StrokeStyle = CanvasRenderingContext2D['strokeStyle'];
+
+interface IntrinsicProps {
+	key?: string;
+}
 
 export interface AlphaProps {
 	alpha?: number;
@@ -821,7 +882,8 @@ export interface CursorStyleProps {
 }
 
 export interface PathProps
-	extends CRCBasicMouseEvents,
+	extends IntrinsicProps,
+		CRCBasicMouseEvents,
 		FillStyleProps,
 		StrokeStyleProps,
 		CursorStyleProps,
@@ -830,14 +892,14 @@ export interface PathProps
 	lineInteractionWidth?: number;
 }
 
-function Path(props: PathProps, ctx: OffscreenCanvasRenderingContext2D) {
+function Path(props: PathProps, ctx: CanvasRenderingContext2D) {
 	const {
 		alpha,
 		path,
 		fillStyle,
 		strokeStyle,
 		lineWidth,
-		lineInteractionWidth = lineWidth,
+		lineInteractionWidth = lineWidth ?? 0,
 	} = props;
 
 	if (alpha) {
@@ -865,7 +927,8 @@ function Path(props: PathProps, ctx: OffscreenCanvasRenderingContext2D) {
 export const path = defineComp(Path);
 
 export interface RectProps
-	extends CRCBasicMouseEvents,
+	extends IntrinsicProps,
+		CRCBasicMouseEvents,
 		FillStyleProps,
 		StrokeStyleProps,
 		AlphaProps,
@@ -889,6 +952,8 @@ function wireCommonEvents(
 		onMouseMove,
 		onMouseOut,
 		onMouseOver,
+		onMouseDown,
+		onMouseUp,
 	} = props;
 
 	if (onClick) {
@@ -945,6 +1010,24 @@ function wireCommonEvents(
 		});
 	}
 
+	if (onMouseDown) {
+		crcMouseDown({
+			path,
+			handler: onMouseDown,
+			fill,
+			lineInteractionWidth,
+		});
+	}
+
+	if (onMouseUp) {
+		crcMouseUp({
+			path,
+			handler: onMouseUp,
+			fill,
+			lineInteractionWidth,
+		});
+	}
+
 	const { cursor } = props;
 
 	if (cursor) {
@@ -957,7 +1040,7 @@ function wireCommonEvents(
 	}
 }
 
-function Rect(props: RectProps, ctx: OffscreenCanvasRenderingContext2D) {
+function Rect(props: RectProps, ctx: CanvasRenderingContext2D) {
 	const { x, y, width, height, ...pathProps } = props;
 	const rectPath = crcRectPath(x, y, width, height);
 	return Path(
@@ -975,14 +1058,15 @@ function Rect(props: RectProps, ctx: OffscreenCanvasRenderingContext2D) {
 export const rect = defineComp(Rect);
 
 export interface LineProps
-	extends CRCBasicMouseEvents,
+	extends IntrinsicProps,
+		CRCBasicMouseEvents,
 		CursorStyleProps,
 		StrokeStyleProps {
 	coords: [number, number][];
 	lineInteractionWidth?: number;
 }
 
-function Line(props: LineProps, ctx: OffscreenCanvasRenderingContext2D) {
+function Line(props: LineProps, ctx: CanvasRenderingContext2D) {
 	const { coords, ...pathProps } = props;
 	const linePath = crcLinePath(coords);
 
@@ -1001,7 +1085,8 @@ function Line(props: LineProps, ctx: OffscreenCanvasRenderingContext2D) {
 export const line = defineComp(Line);
 
 export interface VerticalLineProps
-	extends CRCBasicMouseEvents,
+	extends IntrinsicProps,
+		CRCBasicMouseEvents,
 		CursorStyleProps,
 		StrokeStyleProps {
 	x: number;
@@ -1011,10 +1096,7 @@ export interface VerticalLineProps
 	lineInteractionWidth?: number;
 }
 
-function VerticalLine(
-	props: VerticalLineProps,
-	ctx: OffscreenCanvasRenderingContext2D,
-) {
+function VerticalLine(props: VerticalLineProps, ctx: CanvasRenderingContext2D) {
 	const {
 		x: initialX,
 		top = 0,
@@ -1044,7 +1126,8 @@ function VerticalLine(
 export const verticalLine = defineComp(VerticalLine);
 
 export interface HorizontalLineProps
-	extends CRCBasicMouseEvents,
+	extends IntrinsicProps,
+		CRCBasicMouseEvents,
 		CursorStyleProps,
 		StrokeStyleProps {
 	y: number;
@@ -1056,7 +1139,7 @@ export interface HorizontalLineProps
 
 function HorizontalLine(
 	props: HorizontalLineProps,
-	ctx: OffscreenCanvasRenderingContext2D,
+	ctx: CanvasRenderingContext2D,
 ) {
 	const {
 		y: initialY,
@@ -1087,7 +1170,8 @@ function HorizontalLine(
 export const horizontalLine = defineComp(HorizontalLine);
 
 export interface ImgProps
-	extends CRCBasicMouseEvents,
+	extends IntrinsicProps,
+		CRCBasicMouseEvents,
 		AlphaProps,
 		CursorStyleProps,
 		StrokeStyleProps {
@@ -1098,7 +1182,7 @@ export interface ImgProps
 	height?: number;
 }
 
-function Img(props: ImgProps, ctx: OffscreenCanvasRenderingContext2D) {
+function Img(props: ImgProps, ctx: CanvasRenderingContext2D) {
 	let {
 		alpha,
 		src,
@@ -1125,14 +1209,14 @@ function Img(props: ImgProps, ctx: OffscreenCanvasRenderingContext2D) {
 		img.src = src;
 	}, [src]);
 
-	width ??= image?.width ?? 0;
-	height ??= image?.height ?? 0;
+	width = width ?? image?.width ?? 0;
+	height = height ?? image?.height ?? 0;
 
 	const imagePath = crcRectPath(x, y, width, height);
 
 	crcCursor({
 		path: imagePath,
-		style: props.cursor,
+		style: props.cursor ?? '',
 		fill: true,
 		lineInteractionWidth: props.lineWidth,
 	});
@@ -1147,7 +1231,7 @@ function Img(props: ImgProps, ctx: OffscreenCanvasRenderingContext2D) {
 		ctx.stroke(imagePath);
 	}
 
-	wireCommonEvents(otherProps, imagePath, true, lineWidth);
+	wireCommonEvents(otherProps, imagePath, true, lineWidth ?? 0);
 }
 
 /**
@@ -1156,7 +1240,8 @@ function Img(props: ImgProps, ctx: OffscreenCanvasRenderingContext2D) {
 export const img = defineComp(Img);
 
 export interface SvgPathProps
-	extends CRCBasicMouseEvents,
+	extends IntrinsicProps,
+		CRCBasicMouseEvents,
 		FillStyleProps,
 		StrokeStyleProps,
 		AlphaProps,
@@ -1164,7 +1249,7 @@ export interface SvgPathProps
 	d: string;
 }
 
-function SvgPath(props: SvgPathProps, ctx: OffscreenCanvasRenderingContext2D) {
+function SvgPath(props: SvgPathProps, ctx: CanvasRenderingContext2D) {
 	const { d, ...pathProps } = props;
 	const svgPath = crcSvgPath(d);
 	return Path(
@@ -1181,8 +1266,8 @@ function SvgPath(props: SvgPathProps, ctx: OffscreenCanvasRenderingContext2D) {
  */
 export const svgPath = defineComp(SvgPath);
 
-export interface GProps {
-	children: CompEl[];
+export interface GProps extends IntrinsicProps {
+	children: CRCNode[];
 	scaleX?: number;
 	scaleY?: number;
 	rotate?: number;
@@ -1193,8 +1278,8 @@ export interface GProps {
 	skewY?: number;
 }
 
-function G(props: GProps, ctx: OffscreenCanvasRenderingContext2D) {
-	let transform = new DOMMatrix();
+function G(props: GProps, ctx: CanvasRenderingContext2D) {
+	let transform = ctx.getTransform();
 
 	const { scaleX = 1, scaleY = 1 } = props;
 	if (scaleX !== 1 || scaleY !== 1) {
@@ -1211,7 +1296,7 @@ function G(props: GProps, ctx: OffscreenCanvasRenderingContext2D) {
 	}
 
 	const { x = 0, y = 0 } = props;
-	if (x || y) {
+	if (x !== 0 || y !== 0) {
 		transform = transform.translate(x, y);
 	}
 
@@ -1231,7 +1316,8 @@ function G(props: GProps, ctx: OffscreenCanvasRenderingContext2D) {
 }
 
 export interface TextProps
-	extends CRCBasicMouseEvents,
+	extends IntrinsicProps,
+		CRCBasicMouseEvents,
 		FillStyleProps,
 		StrokeStyleProps,
 		AlphaProps,
@@ -1249,7 +1335,7 @@ export interface TextProps
 	textAlign?: CanvasTextAlign;
 }
 
-export function Text(props: TextProps, ctx: OffscreenCanvasRenderingContext2D) {
+export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 	const {
 		font = '13px sans-serif',
 		textBaseline = 'top',
@@ -1260,7 +1346,13 @@ export function Text(props: TextProps, ctx: OffscreenCanvasRenderingContext2D) {
 	ctx.textBaseline = textBaseline;
 	ctx.textAlign = textAlign;
 
-	const { strokeStyle, lineWidth, fillStyle, x, maxWidth } = props;
+	const {
+		strokeStyle,
+		lineWidth = 0,
+		fillStyle,
+		x,
+		maxWidth = undefined,
+	} = props;
 
 	const renderText = (txt: string, y: number) => {
 		if (strokeStyle && lineWidth) {
@@ -1294,7 +1386,7 @@ export function Text(props: TextProps, ctx: OffscreenCanvasRenderingContext2D) {
 				bounds.actualBoundingBoxAscent;
 		};
 
-		const { maxHeight, lineHeight = 13, overflow = 'clip' } = props;
+		const { maxHeight = Infinity, lineHeight = 13, overflow = 'clip' } = props;
 
 		while (words.length) {
 			const currentYOffset = lineCount * lineHeight;
@@ -1309,7 +1401,7 @@ export function Text(props: TextProps, ctx: OffscreenCanvasRenderingContext2D) {
 				renderText(lastLine, y + currentYOffset);
 				break;
 			} else {
-				if (maxWidth < ctx.measureText(line + words[0]).width) {
+				if ((maxWidth ?? Infinity) < ctx.measureText(line + words[0]).width) {
 					updateTextBounds(line);
 					renderText(line, y + currentYOffset);
 					line = '';
@@ -1419,38 +1511,45 @@ function calculatePixelGridOffset(lineWidth?: number) {
 	return ((lineWidth ?? 0) / 2) % 1;
 }
 
-function detectElementRemoval(
-	element: Element,
-	handler: () => void,
-	signal?: AbortSignal,
-) {
-	const observer = new MutationObserver(() => {
-		if (!document.body.contains(element)) {
-			observer.disconnect();
-			// @ts-ignore
-			element.__crcRemoved = true;
-		}
-	});
-	observer.observe(document.body, { childList: true, subtree: true });
+/**
+ * AbortSignal is SLOW AS A DEAD TURTLE to deal with because of
+ * addEventListener and removeEventListener. Strong avoid.
+ */
+class Teardowns {
+	private readonly _teardowns = new Set<() => void>();
+	private _closed = false;
 
-	signal?.addEventListener('abort', () => {
-		observer.disconnect();
-	});
-}
-
-function shallowEqual<P>(obj1: P, obj2: P): boolean {
-	const obj1Keys = Object.keys(obj1);
-	const obj2Keys = Object.keys(obj2);
-
-	if (obj1Keys.length !== obj2Keys.length) {
-		return false;
+	get closed() {
+		return this._closed;
 	}
 
-	for (const key of obj1Keys) {
-		if (obj1[key] !== obj2[key]) {
-			return false;
+	follow(parentTeardown: Teardowns) {
+		const handler = () => {
+			this.execute();
+		};
+		parentTeardown.add(handler);
+		this.add(() => parentTeardown.remove(handler));
+	}
+
+	add(teardown: () => void) {
+		if (this._closed) {
+			teardown();
+		} else {
+			this._teardowns.add(teardown);
 		}
 	}
 
-	return true;
+	remove(teardown: () => void) {
+		this._teardowns.delete(teardown);
+	}
+
+	execute() {
+		if (!this._closed) {
+			this._closed = true;
+			for (const teardown of this._teardowns) {
+				teardown();
+			}
+			this._teardowns.clear();
+		}
+	}
 }
