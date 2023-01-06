@@ -103,7 +103,7 @@ Sorry, this isn't really documentation, just the basic idea:
 - `crcMemo` - Basically react's `useMemo`. This is VERY useful for memoizing `Path2D` objects that need to be passed to other hooks. Strongly recommended for that use case.
 - `crcWhenChanged` - Looks like react's `useEffect`.. it is **NOT**. It takes a callback that will execute _SYNCHRONOUSLY_ when dependencies change. It also allows the return of a teardown. This is specifically for use cases where one might need to execute some logic only when some dependencies change. **DO NOT USE if you need to _synchronously update some \_state_ when dependencies change, use `crcMemo` instead**.
 - `crcCursor` - A hook to allow the setup of CSS cursor (pointer) changes when hovering a given `Path2D`.
-- `crcClick`, `crcDblClick`, `crcMouseMove`, (et al)... Hooks to allow setup of events related to a given `Path2D`.
+- `crcEvent` - A hook for setting up events related to a particular `Path2D` (or if no path is provided, the entire canvas)
 - `crcRectPath` - A simplified hook that returns a memoized `Path2D` for a rectangle (A common task).
 - `crcLinePath` - A hook for memoized `Path2D` objects from coordinates.
 - `crcSvgPath` - A hook for memoized `Path2D` objects from svg path data strings.
