@@ -1264,16 +1264,18 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 
 	const hasAnyEvents = checkPropsForEvents(props);
 
+	const xd =
+		textAlign === 'end' || textAlign === 'right'
+			? -1
+			: textAlign === 'center'
+			? 0.5
+			: 1;
+	const yd =
+		textBaseline === 'bottom' ? -1 : textBaseline === 'middle' ? 0.5 : 1;
+
 	const clipText = () => {
 		const clipPath = new Path2D();
-		const xd =
-			textAlign === 'end' || textAlign === 'right'
-				? -1
-				: textAlign === 'center'
-				? 0.5
-				: 1;
-		const yd =
-			textBaseline === 'bottom' ? -1 : textBaseline === 'middle' ? 0.5 : 1;
+
 		const pw = maxWidth * xd;
 		const ph = maxHeight * yd;
 		clipPath.rect(x, y, pw, ph);
@@ -1287,16 +1289,15 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 		let line = '';
 		let lineCount = 0;
 
-		let textWidth = 0;
-		let textHeight = 0;
-
 		const updateTextBounds = (line: string) => {
+			textPath = textPath ?? new Path2D();
 			const bounds = ctx.measureText(line);
-			textWidth = Math.max(bounds.width);
-			textHeight =
-				lineCount * lineHeight +
-				bounds.actualBoundingBoxDescent -
-				bounds.actualBoundingBoxAscent;
+			textPath.rect(
+				x,
+				y + lineCount * lineHeight,
+				bounds.width * xd,
+				(bounds.fontBoundingBoxDescent + bounds.fontBoundingBoxAscent) * yd,
+			);
 		};
 
 		if (overflow === 'clip' && maxWidth) {
@@ -1329,11 +1330,6 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 				line += words.shift() + ' ';
 			}
 		}
-
-		if (hasAnyEvents) {
-			textPath = new Path2D();
-			textPath.rect(x, y, textWidth, textHeight);
-		}
 	} else {
 		const text =
 			overflow === 'ellipsis' && maxWidth
@@ -1350,11 +1346,17 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 			const bounds = ctx.measureText(text);
 			const textWidth = bounds.width;
 			const textHeight =
-				bounds.actualBoundingBoxDescent - bounds.actualBoundingBoxAscent;
+				bounds.actualBoundingBoxDescent + bounds.actualBoundingBoxAscent;
 
 			textPath = new Path2D();
 			textPath.rect(x, y, textWidth, textHeight);
 		}
+	}
+
+	if (hasAnyEvents && !text && !textPath) {
+		// We don't want to confuse the system into registering a
+		// global click even or something.
+		textPath = new Path2D();
 	}
 
 	wireCommonEvents(props, textPath, true, lineWidth);
