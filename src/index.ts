@@ -77,21 +77,6 @@ let _renderContext: CanvasRenderingContext2D | undefined = undefined;
 let _unseenIds: Set<string> | undefined = undefined;
 let _seenIds: Set<string> | undefined = undefined;
 
-(globalThis as any).__crcDebug = () => {
-	console.log(
-		Array.from(crcInstances.values(), (crcInstance) => {
-			return {
-				crcInstance,
-				componentRefs: Array.from(crcInstance.refs.entries(), ([id, comp]) => ({
-					id,
-					element: comp.element,
-					refs: comp.refs,
-				})),
-			};
-		}),
-	);
-};
-
 let anonElementNames = new WeakMap<any, string>();
 
 let anon = 0;
@@ -349,11 +334,15 @@ function render<P>(
 				for (let i = 0; i < result.length; i++) {
 					const child = result[i];
 					if (child) {
+						ctx.save();
 						render(child, id, _componentRefs);
+						ctx.restore();
 					}
 				}
 			} else {
+				ctx.save();
 				render(result, id, _componentRefs);
+				ctx.restore();
 			}
 		}
 
@@ -523,7 +512,10 @@ function isHit({
 	const ctx = get2dContext(canvas);
 	ctx.save();
 	try {
-		ctx.setTransform(transform);
+		if (!transform.isIdentity) {
+			ctx.setTransform(transform);
+			({ x, y } = getScaleMatrix(transform).transformPoint({ x, y }));
+		}
 		if (fill && ctx.isPointInPath(path, x, y)) {
 			return true;
 		}
@@ -551,7 +543,7 @@ export function crcCursor({
 	fill = false,
 	lineInteractionWidth = 0,
 }: {
-	path: Path2D;
+	path?: Path2D;
 	style?: string;
 	fill?: boolean;
 	lineInteractionWidth?: number;
@@ -794,6 +786,7 @@ export function crcEvent<K extends keyof CRCEventRegistry>(
 				const canvas = e.target as HTMLCanvasElement;
 				const wasOver = state.isOver;
 				const [x, y] = getMouseCoordinates(e);
+
 				const nowOver =
 					!path ||
 					isHit({ canvas, path, transform, x, y, fill, lineInteractionWidth });
@@ -857,7 +850,7 @@ export function crcEvent<K extends keyof CRCEventRegistry>(
 
 function wireCommonEvents(
 	props: CRCBasicMouseEvents & CursorStyleProps,
-	path: Path2D,
+	path: Path2D | undefined,
 	fill: boolean,
 	lineInteractionWidth: number,
 ) {
@@ -1206,11 +1199,24 @@ export interface TextProps
 	maxWidth?: number;
 	maxHeight?: number;
 	lineHeight?: number;
-	overflow?: 'visible' | 'squish' | 'ellipsis';
+	overflow?: 'visible' | 'squish' | 'ellipsis' | 'clip';
 	wordWrap?: boolean;
 	font?: string;
 	textBaseline?: CanvasTextBaseline;
 	textAlign?: CanvasTextAlign;
+}
+
+function checkPropsForEvents(props: CRCBasicMouseEvents) {
+	return !!(
+		props.onClick ||
+		props.onContextMenu ||
+		props.onDblClick ||
+		props.onMouseDown ||
+		props.onMouseMove ||
+		props.onMouseOut ||
+		props.onMouseOver ||
+		props.onMouseUp
+	);
 }
 
 export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
@@ -1248,15 +1254,25 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 		}
 	};
 
-	let textWidth = 0;
-	let textHeight = 0;
+	const {
+		y,
+		wordWrap,
+		text: inputText,
+		lineHeight = 13,
+		maxHeight = Infinity,
+	} = props;
 
-	const { y, wordWrap } = props;
+	const hasAnyEvents = checkPropsForEvents(props);
+
+	let textPath: Path2D | undefined;
 
 	if (wordWrap) {
-		const words = props.text.split(' ');
+		const words = inputText.split(' ');
 		let line = '';
 		let lineCount = 0;
+
+		let textWidth = 0;
+		let textHeight = 0;
 
 		const updateTextBounds = (line: string) => {
 			const bounds = ctx.measureText(line);
@@ -1267,7 +1283,11 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 				bounds.actualBoundingBoxAscent;
 		};
 
-		const { maxHeight = Infinity, lineHeight = 13 } = props;
+		if (overflow === 'clip' && maxWidth) {
+			const clipPath = new Path2D();
+			clipPath.rect(x, y, maxWidth, maxHeight);
+			ctx.clip(clipPath);
+		}
 
 		while (words.length) {
 			const currentYOffset = lineCount * lineHeight;
@@ -1278,12 +1298,16 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 					overflow === 'ellipsis' && maxWidth
 						? getEllipsisText(ctx, remaining, maxWidth)
 						: remaining;
-				updateTextBounds(lastLine);
+				if (hasAnyEvents) {
+					updateTextBounds(lastLine);
+				}
 				renderText(lastLine, y + currentYOffset);
 				break;
 			} else {
 				if ((maxWidth ?? Infinity) < ctx.measureText(line + words[0]).width) {
-					updateTextBounds(line);
+					if (hasAnyEvents) {
+						updateTextBounds(line);
+					}
 					renderText(line, y + currentYOffset);
 					line = '';
 					lineCount++;
@@ -1291,21 +1315,45 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 				line += words.shift() + ' ';
 			}
 		}
+
+		if (hasAnyEvents) {
+			textPath = new Path2D();
+			textPath.rect(x, y, textWidth, textHeight);
+		}
 	} else {
 		const text =
-			props.overflow === 'ellipsis' && maxWidth
-				? getEllipsisText(ctx, props.text, maxWidth)
-				: props.text;
+			overflow === 'ellipsis' && maxWidth
+				? getEllipsisText(ctx, inputText, maxWidth)
+				: inputText;
+
+		if (overflow === 'clip' && maxWidth) {
+			const clipPath = new Path2D();
+			const xd =
+				textAlign === 'end' || textAlign === 'right'
+					? -1
+					: textAlign === 'center'
+					? 0.5
+					: 1;
+			const yd =
+				textBaseline === 'bottom' ? -1 : textBaseline === 'middle' ? 0.5 : 1;
+			const pw = maxWidth * xd;
+			const ph = maxHeight * yd;
+			clipPath.rect(x, y, pw, ph);
+			ctx.clip(clipPath);
+		}
 
 		renderText(text, y);
 
-		const bounds = ctx.measureText(text);
-		textWidth = bounds.width;
-		textHeight =
-			bounds.actualBoundingBoxDescent - bounds.actualBoundingBoxAscent;
-	}
+		if (hasAnyEvents) {
+			const bounds = ctx.measureText(text);
+			const textWidth = bounds.width;
+			const textHeight =
+				bounds.actualBoundingBoxDescent - bounds.actualBoundingBoxAscent;
 
-	const textPath = crcRectPath(x, y, textWidth, textHeight);
+			textPath = new Path2D();
+			textPath.rect(x, y, textWidth, textHeight);
+		}
+	}
 
 	wireCommonEvents(props, textPath, true, lineWidth);
 }
@@ -1401,6 +1449,11 @@ function calculatePixelGridOffset(lineWidth?: number) {
 
 function adjustForPixelGrid(value: number, lineWidth?: number) {
 	return Math.round(value) - calculatePixelGridOffset(lineWidth);
+}
+
+function getScaleMatrix(matrix: DOMMatrix) {
+	const { m11, m22 } = matrix;
+	return new DOMMatrix([m11, 0, 0, 0, 0, m22, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 }
 
 /**
