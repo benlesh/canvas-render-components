@@ -20,7 +20,7 @@
 		"build": "npm run build:types && npm run build:esm && npm run build:cjs",
 		"test": "echo \"Error: no test specified\" && exit 1",
 		"prepublish": "",
-		"storybook": "start-storybook -p 6006",
+		"storybook": "export NODE_OPTIONS=--openssl-legacy-provider; start-storybook -p 6006",
 		"build-storybook": "build-storybook"
 	},
 	"repository": {

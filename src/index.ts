@@ -1264,6 +1264,22 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 
 	const hasAnyEvents = checkPropsForEvents(props);
 
+	const clipText = () => {
+		const clipPath = new Path2D();
+		const xd =
+			textAlign === 'end' || textAlign === 'right'
+				? -1
+				: textAlign === 'center'
+				? 0.5
+				: 1;
+		const yd =
+			textBaseline === 'bottom' ? -1 : textBaseline === 'middle' ? 0.5 : 1;
+		const pw = maxWidth * xd;
+		const ph = maxHeight * yd;
+		clipPath.rect(x, y, pw, ph);
+		ctx.clip(clipPath);
+	};
+
 	let textPath: Path2D | undefined;
 
 	if (wordWrap) {
@@ -1284,9 +1300,7 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 		};
 
 		if (overflow === 'clip' && maxWidth) {
-			const clipPath = new Path2D();
-			clipPath.rect(x, y, maxWidth, maxHeight);
-			ctx.clip(clipPath);
+			clipText();
 		}
 
 		while (words.length) {
@@ -1327,19 +1341,7 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 				: inputText;
 
 		if (overflow === 'clip' && maxWidth) {
-			const clipPath = new Path2D();
-			const xd =
-				textAlign === 'end' || textAlign === 'right'
-					? -1
-					: textAlign === 'center'
-					? 0.5
-					: 1;
-			const yd =
-				textBaseline === 'bottom' ? -1 : textBaseline === 'middle' ? 0.5 : 1;
-			const pw = maxWidth * xd;
-			const ph = maxHeight * yd;
-			clipPath.rect(x, y, pw, ph);
-			ctx.clip(clipPath);
+			clipText();
 		}
 
 		renderText(text, y);

@@ -22,4 +22,6 @@ export const BasicProperties = template({
 	cursor: 'pointer',
 	overflow: 'ellipsis',
 	wordWrap: true,
+	textAlign: 'left',
+	textBaseline: 'bottom',
 });
