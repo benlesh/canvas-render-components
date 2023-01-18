@@ -24,7 +24,6 @@ There's a [playground link here on Stackblitz](https://stackblitz.com/fork/canva
 - Screen reader updates
 - Components:
   - Ellipse? Circle?
-  - Clipping: A component to define a clipping area? Maybe this could be done with the `g` component?
 - Do I want to allow transformations (scale, rotate, etc) on other existing components?
 
 ## Getting Started
@@ -95,6 +94,7 @@ Sorry, this isn't really documentation, just the basic idea:
 - `svgPath`: Renders svg path data as a shape
 - `img`: Loads and renders an image
 - `g`: A grouping component that allows the group application of transformations such as scale, rotation, etc.
+- `clip`: A grouping component that applies a clipping path to everything rendered in its `children`. It ALSO will "clip" events.
 
 ## Hooks
 
@@ -107,3 +107,21 @@ Sorry, this isn't really documentation, just the basic idea:
 - `crcRectPath` - A simplified hook that returns a memoized `Path2D` for a rectangle (A common task).
 - `crcLinePath` - A hook for memoized `Path2D` objects from coordinates.
 - `crcSvgPath` - A hook for memoized `Path2D` objects from svg path data strings.
+
+# Tips
+
+## Events coming through other rendered things
+
+If you're seeing events "bleeding through" things you've rendered over top of them, you need to use the `clip` component to constrain where the event is allowed to fire. Events are registered separate from rendering anything, they operate on a 2d plain of their own and don't "know" about what pixels are rendered where. The `clip` component keeps track of clipping paths in a context that it will apply to events registered underneath it. Basically, if your event is registered against a path as part of a `clip` components children or descendants, for the event to fire, it must match the event path AND the clipping path. Think of the clipping path as a "mask" of where events underneath it are "allowed" to fire. (It also clips what is rendered)
+
+## Order matters!
+
+The last thing in a list of children will be rendered "on top". Remember that as you're rendering things.
+
+## Perf: More events, more problems.
+
+Events are register and/or unregistered on every render. They're associated with `Path2D` objects, functions that are handlers, and probably some closure and other things. **The more events you have, the slower your render will be**. Full stop. So, "event delegation" can be a useful tool for you. Perhaps what you need to do is use the `crcEvent` hook and register one event against a compound path of some sort. Or maybe register an event against the whole canvas by passing a `undefined` path to `crcEvent`, and then do some of your own math to figure out if it's a hit or not. In any case, if you're registering and unregistring 1,000 event handlers on each render, it's going to add up. Don't do that.
+
+## Perf: Canvas layering
+
+Another technique is to have more than one canvas, one on top of the other. In this way, you can have elements of your scene that are rarely updated rendered on the "bottom" canvas, while your more frequently updated elements are rendered on the "top" canvas. This means less code being executed on each pass.

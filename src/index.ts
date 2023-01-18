@@ -40,6 +40,7 @@ interface CompRefs<P> {
 	element: CompEl<P>;
 	refs: any[];
 	teardowns: Teardowns;
+	onAfterRender: (() => void) | undefined;
 }
 
 export type CRCMouseEventListener = (e: CRCMouseEvent) => void;
@@ -63,6 +64,8 @@ interface CRCInstance {
 	events: CRCEventRegistry;
 }
 
+export type PixelGridAlignment = 'none' | 'round' | 'ceil' | 'floor';
+
 ////////////////////////////////////////////////////////////////////////////////////////
 // Shared State
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -76,6 +79,8 @@ let _componentHookIndex = 0;
 let _renderContext: CanvasRenderingContext2D | undefined = undefined;
 let _unseenIds: Set<string> | undefined = undefined;
 let _seenIds: Set<string> | undefined = undefined;
+let clippingStack: { path: Path2D; fillRule: CanvasFillRule | undefined }[] =
+	[];
 
 let anonElementNames = new WeakMap<any, string>();
 
@@ -102,6 +107,7 @@ export function clearSharedState() {
 		cleanupCRCInstance(crcInstance);
 	}
 	crcInstances.clear();
+	clippingStack = [];
 	anonElementNames = new WeakMap<any, string>();
 	clearTempState();
 }
@@ -281,11 +287,13 @@ export function update<P>(canvas: HTMLCanvasElement, rootElement?: CompEl) {
 		throw new Error('Canvas does not have CRC mounted.');
 	}
 
-	if (!crcInstance.animationFrameId) {
-		crcInstance.animationFrameId = requestAnimationFrame((ts) =>
-			executeRender(canvas, ts, rootElement),
-		);
+	if (crcInstance.animationFrameId) {
+		cancelAnimationFrame(crcInstance.animationFrameId);
 	}
+
+	crcInstance.animationFrameId = requestAnimationFrame((ts) =>
+		executeRender(canvas, ts, rootElement),
+	);
 }
 
 function getElementTypeName(element: CompEl): string {
@@ -314,6 +322,7 @@ function render<P>(
 				element,
 				refs: [],
 				teardowns,
+				onAfterRender: undefined,
 			});
 		}
 
@@ -328,6 +337,9 @@ function render<P>(
 			_componentRefs.element.props,
 			ctx,
 		);
+
+		const onAfterRender = _componentRefs.onAfterRender;
+		_componentRefs.onAfterRender = undefined;
 
 		if (result) {
 			if (Array.isArray(result)) {
@@ -346,11 +358,34 @@ function render<P>(
 			}
 		}
 
+		onAfterRender?.();
+
 		ctx.restore();
 	} finally {
 		clearComponentState();
 	}
 }
+
+export interface ClipProps {
+	path: Path2D;
+	fillRule?: CanvasFillRule;
+	children: CRCNode[];
+}
+
+export function Clip(props: ClipProps, ctx: CanvasRenderingContext2D) {
+	const { path, fillRule } = props;
+
+	_componentRefs!.onAfterRender = () => {
+		clippingStack.pop();
+	};
+
+	clippingStack.push({ path, fillRule });
+	ctx.clip(path, fillRule);
+
+	return props.children;
+}
+
+export const clip = defineComp(Clip);
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Hooks
@@ -500,6 +535,7 @@ function isHit({
 	y,
 	fill,
 	lineInteractionWidth,
+	currentClippingStack,
 }: {
 	canvas: HTMLCanvasElement;
 	transform: DOMMatrix;
@@ -508,6 +544,10 @@ function isHit({
 	y: number;
 	fill: boolean;
 	lineInteractionWidth: number;
+	currentClippingStack: {
+		path: Path2D;
+		fillRule: CanvasFillRule | undefined;
+	}[];
 }) {
 	const ctx = get2dContext(canvas);
 	ctx.save();
@@ -516,19 +556,43 @@ function isHit({
 			ctx.setTransform(transform);
 			({ x, y } = getScaleMatrix(transform).transformPoint({ x, y }));
 		}
-		if (fill && ctx.isPointInPath(path, x, y)) {
-			return true;
-		}
-		if (lineInteractionWidth > 0) {
-			ctx.lineWidth = lineInteractionWidth;
-			if (ctx.isPointInStroke(path, x, y)) {
+		if (isInAtLeastOneClippingPath(currentClippingStack, x, y, ctx)) {
+			if (fill && ctx.isPointInPath(path, x, y)) {
 				return true;
+			}
+			if (lineInteractionWidth > 0) {
+				ctx.lineWidth = lineInteractionWidth;
+				if (ctx.isPointInStroke(path, x, y)) {
+					return true;
+				}
 			}
 		}
 		return false;
 	} finally {
 		ctx.restore();
 	}
+}
+
+function isInAtLeastOneClippingPath(
+	currentClippingStack: {
+		path: Path2D;
+		fillRule: CanvasFillRule | undefined;
+	}[],
+	x: number,
+	y: number,
+	ctx: CanvasRenderingContext2D,
+) {
+	if (currentClippingStack.length === 0) {
+		return true;
+	}
+
+	for (const { path, fillRule } of currentClippingStack) {
+		if (ctx.isPointInPath(path, x, y, fillRule)) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 /**
@@ -549,7 +613,7 @@ export function crcCursor({
 	lineInteractionWidth?: number;
 }) {
 	crcEvent(
-		'mouseover',
+		'mousemove',
 		style
 			? (e) => {
 					const canvas = e.originalEvent.target as HTMLCanvasElement;
@@ -588,9 +652,9 @@ export function crcRectPath(
 	y: number,
 	width: number,
 	height: number,
-	config?: { alignToPixelGrid?: boolean; lineWidth?: number },
+	config?: { alignToPixelGrid?: PixelGridAlignment; lineWidth?: number },
 ): Path2D {
-	const alignToPixelGrid = config?.alignToPixelGrid ?? false;
+	const alignToPixelGrid = config?.alignToPixelGrid;
 
 	if (alignToPixelGrid) {
 		({ x, y, width, height } = adjustRectangleToPixelGrid(
@@ -599,6 +663,7 @@ export function crcRectPath(
 			y,
 			width,
 			height,
+			alignToPixelGrid,
 		));
 	}
 
@@ -615,14 +680,15 @@ function adjustRectangleToPixelGrid(
 	y: number,
 	width: number,
 	height: number,
+	alignment: PixelGridAlignment,
 ) {
-	x = adjustForPixelGrid(x, lineWidth);
-	y = adjustForPixelGrid(y, lineWidth);
+	x = adjustForPixelGrid(x, lineWidth, alignment);
+	y = adjustForPixelGrid(y, lineWidth, alignment);
 	const right = x + width;
-	const adjustedRight = adjustForPixelGrid(right, lineWidth) + 1;
+	const adjustedRight = adjustForPixelGrid(right, lineWidth, alignment) + 1;
 	width = adjustedRight - x;
 	const bottom = y + height;
-	const adjustedBottom = adjustForPixelGrid(bottom, lineWidth) + 1;
+	const adjustedBottom = adjustForPixelGrid(bottom, lineWidth, alignment) + 1;
 	height = adjustedBottom - y;
 	return { x, y, width, height };
 }
@@ -635,21 +701,7 @@ export function crcLinePath(
 	coords: [number, number][],
 	config?: { closePath?: boolean },
 ): Path2D {
-	return crcMemo(() => {
-		const path = new Path2D();
-		for (let i = 0; i < coords.length; i++) {
-			const [x, y] = coords[i];
-			if (i === 0) {
-				path.moveTo(x, y);
-			} else {
-				path.lineTo(x, y);
-			}
-		}
-		if (config?.closePath) {
-			path.closePath();
-		}
-		return path;
-	}, coords.flat());
+	return crcMemo(() => createLinePath(coords, config), coords.flat());
 }
 
 /**
@@ -724,7 +776,7 @@ function Path(props: PathProps, ctx: CanvasRenderingContext2D) {
 		ctx.globalAlpha = ctx.globalAlpha * alpha;
 	}
 
-	if (fillStyle) {
+	if (fillStyle && !isTransparent(fillStyle)) {
 		ctx.fillStyle = fillStyle;
 		ctx.fill(path);
 	}
@@ -755,7 +807,7 @@ export interface RectProps
 	y: number;
 	width: number;
 	height: number;
-	alignToPixelGrid?: boolean;
+	alignToPixelGrid?: PixelGridAlignment;
 }
 
 export function crcEvent<K extends keyof CRCEventRegistry>(
@@ -774,6 +826,7 @@ export function crcEvent<K extends keyof CRCEventRegistry>(
 
 	if (handler) {
 		const transform = _renderContext!.getTransform();
+		const currentClippingStack = Array.from(clippingStack);
 
 		if (type === 'mouseover' || type === 'mouseout') {
 			if (!componentRefs.refs[hookIndex]) {
@@ -789,7 +842,16 @@ export function crcEvent<K extends keyof CRCEventRegistry>(
 
 				const nowOver =
 					!path ||
-					isHit({ canvas, path, transform, x, y, fill, lineInteractionWidth });
+					isHit({
+						canvas,
+						path,
+						transform,
+						x,
+						y,
+						fill,
+						lineInteractionWidth,
+						currentClippingStack,
+					});
 				state.isOver = nowOver;
 
 				if (type === 'mouseover') {
@@ -833,7 +895,16 @@ export function crcEvent<K extends keyof CRCEventRegistry>(
 				const [x, y] = getMouseCoordinates(e);
 				if (
 					!path ||
-					isHit({ canvas, path, transform, x, y, fill, lineInteractionWidth })
+					isHit({
+						canvas,
+						path,
+						transform,
+						x,
+						y,
+						fill,
+						lineInteractionWidth,
+						currentClippingStack,
+					})
 				) {
 					handler({ originalEvent: e, x, y });
 				}
@@ -892,6 +963,7 @@ function Rect(props: RectProps, ctx: CanvasRenderingContext2D) {
 			y,
 			width,
 			height,
+			alignToPixelGrid,
 		));
 	}
 
@@ -923,7 +995,7 @@ export interface LineProps
 
 export function Line(props: LineProps, ctx: CanvasRenderingContext2D) {
 	const { coords, ...pathProps } = props;
-	const linePath = crcLinePath(coords);
+	const linePath = createLinePath(coords);
 
 	return Path(
 		{
@@ -947,7 +1019,7 @@ export interface VerticalLineProps
 	x: number;
 	top?: number;
 	bottom?: number;
-	alignToPixelGrid?: boolean;
+	alignToPixelGrid?: PixelGridAlignment;
 	lineInteractionWidth?: number;
 }
 
@@ -959,12 +1031,10 @@ export function VerticalLine(
 		x: initialX,
 		top = 0,
 		bottom = ctx.canvas.height,
-		alignToPixelGrid = false,
+		alignToPixelGrid = 'none',
 		...lineProps
 	} = props;
-	const x = alignToPixelGrid
-		? adjustForPixelGrid(initialX, props.lineWidth)
-		: initialX;
+	const x = adjustForPixelGrid(initialX, props.lineWidth, alignToPixelGrid);
 	const coords: [number, number][] = [
 		[x, top],
 		[x, bottom],
@@ -992,7 +1062,7 @@ export interface HorizontalLineProps
 	y: number;
 	left?: number;
 	right?: number;
-	alignToPixelGrid?: boolean;
+	alignToPixelGrid?: PixelGridAlignment;
 	lineInteractionWidth?: number;
 }
 
@@ -1004,11 +1074,11 @@ export function HorizontalLine(
 		y: initialY,
 		left = 0,
 		right = ctx.canvas.width,
-		alignToPixelGrid = false,
+		alignToPixelGrid,
 		...lineProps
 	} = props;
 	const y = alignToPixelGrid
-		? adjustForPixelGrid(initialY, props.lineWidth)
+		? adjustForPixelGrid(initialY, props.lineWidth, alignToPixelGrid)
 		: initialY;
 	const coords: [number, number][] = [
 		[left, y],
@@ -1039,7 +1109,7 @@ export interface ImgProps
 	y: number;
 	width?: number;
 	height?: number;
-	alignToPixelGrid?: boolean;
+	alignToPixelGrid?: PixelGridAlignment;
 }
 
 function Img(props: ImgProps, ctx: CanvasRenderingContext2D) {
@@ -1264,24 +1334,6 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 
 	const hasAnyEvents = checkPropsForEvents(props);
 
-	const xd =
-		textAlign === 'end' || textAlign === 'right'
-			? -1
-			: textAlign === 'center'
-			? 0.5
-			: 1;
-	const yd =
-		textBaseline === 'bottom' ? -1 : textBaseline === 'middle' ? 0.5 : 1;
-
-	const clipText = () => {
-		const clipPath = new Path2D();
-
-		const pw = maxWidth * xd;
-		const ph = maxHeight * yd;
-		clipPath.rect(x, y, pw, ph);
-		ctx.clip(clipPath);
-	};
-
 	let textPath: Path2D | undefined;
 
 	if (wordWrap) {
@@ -1289,19 +1341,22 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 		let line = '';
 		let lineCount = 0;
 
+		let textWidth = 0;
+		let textHeight = 0;
+
 		const updateTextBounds = (line: string) => {
-			textPath = textPath ?? new Path2D();
 			const bounds = ctx.measureText(line);
-			textPath.rect(
-				x,
-				y + lineCount * lineHeight,
-				bounds.width * xd,
-				(bounds.fontBoundingBoxDescent + bounds.fontBoundingBoxAscent) * yd,
-			);
+			textWidth = Math.max(bounds.width);
+			textHeight =
+				lineCount * lineHeight +
+				bounds.actualBoundingBoxDescent -
+				bounds.actualBoundingBoxAscent;
 		};
 
 		if (overflow === 'clip' && maxWidth) {
-			clipText();
+			const clipPath = new Path2D();
+			clipPath.rect(x, y, maxWidth, maxHeight);
+			ctx.clip(clipPath);
 		}
 
 		while (words.length) {
@@ -1330,6 +1385,11 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 				line += words.shift() + ' ';
 			}
 		}
+
+		if (hasAnyEvents) {
+			textPath = new Path2D();
+			textPath.rect(x, y, textWidth, textHeight);
+		}
 	} else {
 		const text =
 			overflow === 'ellipsis' && maxWidth
@@ -1337,7 +1397,19 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 				: inputText;
 
 		if (overflow === 'clip' && maxWidth) {
-			clipText();
+			const clipPath = new Path2D();
+			const xd =
+				textAlign === 'end' || textAlign === 'right'
+					? -1
+					: textAlign === 'center'
+					? 0.5
+					: 1;
+			const yd =
+				textBaseline === 'bottom' ? -1 : textBaseline === 'middle' ? 0.5 : 1;
+			const pw = maxWidth * xd;
+			const ph = maxHeight * yd;
+			clipPath.rect(x, y, pw, ph);
+			ctx.clip(clipPath);
 		}
 
 		renderText(text, y);
@@ -1346,17 +1418,11 @@ export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
 			const bounds = ctx.measureText(text);
 			const textWidth = bounds.width;
 			const textHeight =
-				bounds.actualBoundingBoxDescent + bounds.actualBoundingBoxAscent;
+				bounds.actualBoundingBoxDescent - bounds.actualBoundingBoxAscent;
 
 			textPath = new Path2D();
 			textPath.rect(x, y, textWidth, textHeight);
 		}
-	}
-
-	if (hasAnyEvents && !text && !textPath) {
-		// We don't want to confuse the system into registering a
-		// global click even or something.
-		textPath = new Path2D();
 	}
 
 	wireCommonEvents(props, textPath, true, lineWidth);
@@ -1447,17 +1513,53 @@ function get2dContext(canvas: HTMLCanvasElement) {
 	return ctx;
 }
 
-function calculatePixelGridOffset(lineWidth?: number) {
+function calculatePixelGridOffset(lineWidth: number) {
 	return ((lineWidth ?? 0) / 2) % 1;
 }
 
-function adjustForPixelGrid(value: number, lineWidth?: number) {
-	return Math.round(value) - calculatePixelGridOffset(lineWidth);
+function adjustForPixelGrid(
+	value: number,
+	lineWidth: number | undefined,
+	alignment: undefined | PixelGridAlignment,
+) {
+	if (!alignment || alignment === 'none') {
+		return value;
+	}
+
+	return Math[alignment](value) - calculatePixelGridOffset(lineWidth ?? 0);
 }
 
 function getScaleMatrix(matrix: DOMMatrix) {
 	const { m11, m22 } = matrix;
 	return new DOMMatrix([m11, 0, 0, 0, 0, m22, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+}
+
+const TRANSPARENT_REGEXP = /^(hsla|rgba)\(.*,\s*0\s*\)$/;
+
+function isTransparent(style: string | CanvasGradient | CanvasPattern) {
+	return (
+		typeof style === 'string' &&
+		(style === 'transparent' || TRANSPARENT_REGEXP.test(style))
+	);
+}
+
+function createLinePath(
+	coords: [number, number][],
+	config?: { closePath?: boolean },
+) {
+	const path = new Path2D();
+	for (let i = 0; i < coords.length; i++) {
+		const [x, y] = coords[i];
+		if (i === 0) {
+			path.moveTo(x, y);
+		} else {
+			path.lineTo(x, y);
+		}
+	}
+	if (config?.closePath) {
+		path.closePath();
+	}
+	return path;
 }
 
 /**
