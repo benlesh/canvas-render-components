@@ -1,6 +1,6 @@
 {
 	"name": "canvas-render-components",
-	"version": "0.0.14",
+	"version": "0.0.15",
 	"description": "HTML Canvas Componentized Rendering",
 	"types": "./dist/types/index.d.ts",
 	"main": "./dist/cjs/index.js",
