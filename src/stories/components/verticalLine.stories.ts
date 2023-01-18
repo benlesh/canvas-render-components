@@ -14,5 +14,5 @@ export const BasicProperties = template({
 	strokeStyle: 'blue',
 	cursor: 'pointer',
 	lineInteractionWidth: 20,
-	alignToPixelGrid: true,
+	alignToPixelGrid: 'round',
 });
