@@ -95,6 +95,7 @@ Sorry, this isn't really documentation, just the basic idea:
 - `img`: Loads and renders an image
 - `g`: A grouping component that allows the group application of transformations such as scale, rotation, etc.
 - `clip`: A grouping component that applies a clipping path to everything rendered in its `children`. It ALSO will "clip" events.
+- `layer`: A component for memoizing another component as a unit of render. Basically, if the props of the `CompEl` passed to `render` change, or if the canvas size changes, it will re-render itself. Otherwise, it will render a cached image. See the storybook for example. Note that it does a shallow, reference check on the props of the element passed to render.
 
 ## Hooks
 

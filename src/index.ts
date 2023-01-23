@@ -29,9 +29,14 @@ type FalsyNodes = undefined | false | null | '' | 0;
 
 export type CRCNode = CompEl | void | FalsyNodes;
 
+export type Canvas = HTMLCanvasElement | OffscreenCanvas;
+export type RenderingContext2D =
+	| CanvasRenderingContext2D
+	| OffscreenCanvasRenderingContext2D;
+
 export type CompFn<P> = (
 	props: P,
-	ctx: CanvasRenderingContext2D,
+	ctx: RenderingContext2D,
 ) => CRCNode[] | CRCNode | void;
 
 interface CompRefs<P> {
@@ -55,6 +60,7 @@ interface CRCEventRegistry {
 	mouseup: Set<(e: MouseEvent) => void>;
 	contextmenu: Set<(e: MouseEvent) => void>;
 }
+
 interface CRCInstance {
 	root: CompEl<any>;
 	refs: Map<string, CompRefs<any>>;
@@ -62,6 +68,7 @@ interface CRCInstance {
 	renderTimestamp: number;
 	mainTeardowns: Teardowns;
 	events: CRCEventRegistry;
+	parent: Canvas | undefined;
 }
 
 export type PixelGridAlignment = 'none' | 'round' | 'ceil' | 'floor';
@@ -70,17 +77,21 @@ export type PixelGridAlignment = 'none' | 'round' | 'ceil' | 'floor';
 // Shared State
 ////////////////////////////////////////////////////////////////////////////////////////
 
-let crcInstances = new Map<HTMLCanvasElement, CRCInstance>();
+let crcInstances = new Map<Canvas, CRCInstance>();
 let _currentCRCInstance: CRCInstance | undefined = undefined;
 let _componentRefs: CompRefs<any> | undefined = undefined;
-let _canvas: HTMLCanvasElement | undefined = undefined;
+let _canvas: Canvas | undefined = undefined;
 let _componentIsMounting = false;
 let _componentHookIndex = 0;
-let _renderContext: CanvasRenderingContext2D | undefined = undefined;
+let _renderContext: RenderingContext2D | undefined = undefined;
 let _unseenIds: Set<string> | undefined = undefined;
 let _seenIds: Set<string> | undefined = undefined;
-let clippingStack: { path: Path2D; fillRule: CanvasFillRule | undefined }[] =
-	[];
+let _mouseTransform: DOMMatrix | undefined = undefined;
+let clippingStack: {
+	path: Path2D;
+	fillRule: CanvasFillRule;
+	transform: DOMMatrix;
+}[] = [];
 
 let anonElementNames = new WeakMap<any, string>();
 
@@ -145,46 +156,89 @@ export function crc<P>(
 	config?: { signal?: AbortSignal },
 ) {
 	if (!crcInstances.has(canvas)) {
-		const mainTeardowns = new Teardowns();
+		mountCRC<P>(canvas, element, config);
+	}
 
-		const signal = config?.signal;
+	update(canvas, element);
+}
 
-		const cleanup = () => {
-			crcInstances.delete(canvas);
-			mainTeardowns.execute();
-		};
+function mountCRC<P>(
+	canvas: Canvas,
+	element: CompEl<P>,
+	config?: { signal?: AbortSignal; parent?: Canvas },
+) {
+	const mainTeardowns = new Teardowns();
 
-		if (signal) {
-			signal.addEventListener('abort', cleanup, {
-				once: true,
-			});
+	const signal = config?.signal;
+
+	const cleanup = () => {
+		crcInstances.delete(canvas);
+		mainTeardowns.execute();
+	};
+
+	if (signal) {
+		signal.addEventListener('abort', cleanup, {
+			once: true,
+		});
+		mainTeardowns.add(() => {
+			signal.removeEventListener('abort', cleanup);
+		});
+	}
+
+	const parent = config?.parent;
+
+	const crcInstance: CRCInstance = {
+		root: element,
+		refs: new Map(),
+		animationFrameId: 0,
+		renderTimestamp: 0,
+		mainTeardowns,
+		events: {
+			click: new Set(),
+			dblclick: new Set(),
+			mousemove: new Set(),
+			mouseover: new Set(),
+			mouseout: new Set(),
+			mousedown: new Set(),
+			mouseup: new Set(),
+			contextmenu: new Set(),
+		},
+		parent,
+	};
+
+	if (parent) {
+		const parentCRCInstance = crcInstances.get(parent);
+
+		for (const [type, handlers] of Object.entries(crcInstance.events)) {
+			const handler = (e: MouseEvent) => {
+				_mouseTransform = createMouseEventTransform(
+					e.target as HTMLCanvasElement,
+				);
+				for (const handler of handlers) {
+					try {
+						handler(e);
+					} catch (err) {
+						reportError(err);
+					}
+				}
+				_mouseTransform = undefined;
+			};
+
+			parentCRCInstance.events[type].add(handler);
+
 			mainTeardowns.add(() => {
-				signal.removeEventListener('abort', cleanup);
+				parentCRCInstance.events[type].delete(handler);
 			});
 		}
-
-		const crcInstance: CRCInstance = {
-			root: element,
-			refs: new Map(),
-			animationFrameId: 0,
-			renderTimestamp: 0,
-			mainTeardowns,
-			events: {
-				click: new Set(),
-				dblclick: new Set(),
-				mousemove: new Set(),
-				mouseover: new Set(),
-				mouseout: new Set(),
-				mousedown: new Set(),
-				mouseup: new Set(),
-				contextmenu: new Set(),
-			},
-		};
-
+	} else {
+		// Only the parent canvas wires up events.
 		for (const [type, handlers] of Object.entries(crcInstance.events)) {
 			canvas.addEventListener(
 				type,
 				(e) => {
+					_mouseTransform = createMouseEventTransform(
+						canvas as HTMLCanvasElement,
+					);
 					for (const handler of handlers) {
 						try {
 							handler(e);
@@ -192,15 +246,14 @@ export function crc<P>(
 							reportError(err);
 						}
 					}
+					_mouseTransform = undefined;
 				},
 				{ signal },
 			);
 		}
-
-		crcInstances.set(canvas, crcInstance);
 	}
 
-	update(canvas, element);
+	crcInstances.set(canvas, crcInstance);
 }
 
 /**
@@ -223,15 +276,26 @@ export function defineComp<P>(compFn: CompFn<P>) {
 	return (props: P) => createElement(compFn, props);
 }
 
+function createMouseEventTransform(canvas: HTMLCanvasElement) {
+	const { width, height } = canvas;
+	const bounds = canvas.getBoundingClientRect();
+	const xScale = width / bounds.width;
+	const yScale = height / bounds.height;
+	if (xScale !== 1 || yScale !== 1) {
+		return new DOMMatrix().scale(xScale, yScale);
+	}
+}
+
 /**
  * Gets the root element for a canvas and renders it. This is the
  * entry point for rendering the entire tree.
  * @param canvas The canvas to render on
  */
 function executeRender(
-	canvas: HTMLCanvasElement,
+	canvas: Canvas,
 	renderTimestamp: number,
 	updatedRoot?: CompEl,
+	updateParents = false,
 ) {
 	if (!canvas) {
 		throw new Error('No canvas element provided');
@@ -247,6 +311,13 @@ function executeRender(
 
 	if (crcInstance.mainTeardowns.closed) return;
 
+	const prevCurrentCRCInstance = _currentCRCInstance;
+	const prevCanvas = _canvas;
+	const prevRenderContext = _renderContext;
+	const prevMouseTransform = _mouseTransform;
+	const prevSeenIds = _seenIds;
+	const prevUnseendIds = _unseenIds;
+	const prevComponentRefs = _componentRefs;
 	try {
 		_currentCRCInstance = crcInstance;
 		_currentCRCInstance.renderTimestamp = renderTimestamp;
@@ -271,7 +342,20 @@ function executeRender(
 			_currentCRCInstance.refs.delete(id);
 		}
 	} finally {
+		const { parent } = _currentCRCInstance;
 		clearTempState();
+		if (updateParents) {
+			if (parent) {
+				executeRender(parent, renderTimestamp);
+			}
+		}
+		_currentCRCInstance = prevCurrentCRCInstance;
+		_canvas = prevCanvas;
+		_renderContext = prevRenderContext;
+		_mouseTransform = prevMouseTransform;
+		_seenIds = prevSeenIds;
+		_unseenIds = prevUnseendIds;
+		_componentRefs = prevComponentRefs;
 	}
 }
 
@@ -280,7 +364,7 @@ function executeRender(
  * @param canvas The canvas with CRC mounted on it to update
  * @param element The optional element to update as the root element of that canvas.
  */
-export function update<P>(canvas: HTMLCanvasElement, rootElement?: CompEl) {
+function update(canvas: Canvas, rootElement?: CompEl, updateParents = false) {
 	const crcInstance = crcInstances.get(canvas)!;
 
 	if (!crcInstance) {
@@ -292,7 +376,7 @@ export function update<P>(canvas: HTMLCanvasElement, rootElement?: CompEl) {
 	}
 
 	crcInstance.animationFrameId = requestAnimationFrame((ts) =>
-		executeRender(canvas, ts, rootElement),
+		executeRender(canvas, ts, rootElement, updateParents),
 	);
 }
 
@@ -372,14 +456,14 @@ export interface ClipProps {
 	children: CRCNode[];
 }
 
-export function Clip(props: ClipProps, ctx: CanvasRenderingContext2D) {
-	const { path, fillRule } = props;
+export function Clip(props: ClipProps, ctx: RenderingContext2D) {
+	const { path, fillRule = 'nonzero' } = props;
 
 	_componentRefs!.onAfterRender = () => {
 		clippingStack.pop();
 	};
 
-	clippingStack.push({ path, fillRule });
+	clippingStack.push({ path, fillRule, transform: ctx.getTransform() });
 	ctx.clip(path, fillRule);
 
 	return props.children;
@@ -445,7 +529,7 @@ export function crcState<T>(init?: T): readonly [T, StateUpdater<T>] {
 				typeof newValueOrFactory === 'function'
 					? (newValueOrFactory as any)(ref.value)
 					: newValueOrFactory;
-			update(canvas!);
+			update(canvas!, undefined, true);
 		}
 
 		_componentRefs!.refs.push(ref);
@@ -472,6 +556,7 @@ export function crcMemo<T>(create: () => T, deps: any[]): T {
 		const { deps: lastDeps } = refs[hookIndex];
 		if (!deps || !shallowArrayEquals(deps, lastDeps)) {
 			refs[hookIndex].value = create();
+			refs[hookIndex].deps = deps;
 		}
 	}
 
@@ -544,19 +629,20 @@ function isHit({
 	y: number;
 	fill: boolean;
 	lineInteractionWidth: number;
-	currentClippingStack: {
-		path: Path2D;
-		fillRule: CanvasFillRule | undefined;
-	}[];
+	currentClippingStack: typeof clippingStack;
 }) {
 	const ctx = get2dContext(canvas);
 	ctx.save();
 	try {
-		if (!transform.isIdentity) {
-			ctx.setTransform(transform);
-			({ x, y } = getScaleMatrix(transform).transformPoint({ x, y }));
+		if (_mouseTransform) {
+			({ x, y } = _mouseTransform.transformPoint({ x, y }));
 		}
+
 		if (isInAtLeastOneClippingPath(currentClippingStack, x, y, ctx)) {
+			if (!transform.isIdentity) {
+				ctx.setTransform(transform);
+			}
+
 			if (fill && ctx.isPointInPath(path, x, y)) {
 				return true;
 			}
@@ -574,21 +660,28 @@ function isHit({
 }
 
 function isInAtLeastOneClippingPath(
-	currentClippingStack: {
-		path: Path2D;
-		fillRule: CanvasFillRule | undefined;
-	}[],
+	currentClippingStack: typeof clippingStack,
 	x: number,
 	y: number,
-	ctx: CanvasRenderingContext2D,
+	ctx: RenderingContext2D,
 ) {
 	if (currentClippingStack.length === 0) {
 		return true;
 	}
 
-	for (const { path, fillRule } of currentClippingStack) {
-		if (ctx.isPointInPath(path, x, y, fillRule)) {
-			return true;
+	for (const { path, fillRule, transform } of currentClippingStack) {
+		if (!transform.isIdentity) {
+			ctx.save();
+			ctx.setTransform(transform);
+		}
+		try {
+			if (ctx.isPointInPath(path, x, y, fillRule)) {
+				return true;
+			}
+		} finally {
+			if (!transform.isIdentity) {
+				ctx.restore();
+			}
 		}
 	}
 
@@ -762,7 +855,7 @@ export interface PathProps
 	lineInteractionWidth?: number;
 }
 
-function Path(props: PathProps, ctx: CanvasRenderingContext2D) {
+function Path(props: PathProps, ctx: RenderingContext2D) {
 	const {
 		alpha,
 		path,
@@ -953,7 +1046,7 @@ function wireCommonEvents(
 	});
 }
 
-function Rect(props: RectProps, ctx: CanvasRenderingContext2D) {
+function Rect(props: RectProps, ctx: RenderingContext2D) {
 	let { x, y, width, height, alignToPixelGrid, ...pathProps } = props;
 
 	if (alignToPixelGrid) {
@@ -993,7 +1086,7 @@ export interface LineProps
 	lineInteractionWidth?: number;
 }
 
-export function Line(props: LineProps, ctx: CanvasRenderingContext2D) {
+export function Line(props: LineProps, ctx: RenderingContext2D) {
 	const { coords, ...pathProps } = props;
 	const linePath = createLinePath(coords);
 
@@ -1025,7 +1118,7 @@ export interface VerticalLineProps
 
 export function VerticalLine(
 	props: VerticalLineProps,
-	ctx: CanvasRenderingContext2D,
+	ctx: RenderingContext2D,
 ) {
 	const {
 		x: initialX,
@@ -1068,7 +1161,7 @@ export interface HorizontalLineProps
 
 export function HorizontalLine(
 	props: HorizontalLineProps,
-	ctx: CanvasRenderingContext2D,
+	ctx: RenderingContext2D,
 ) {
 	const {
 		y: initialY,
@@ -1112,7 +1205,7 @@ export interface ImgProps
 	alignToPixelGrid?: PixelGridAlignment;
 }
 
-function Img(props: ImgProps, ctx: CanvasRenderingContext2D) {
+function Img(props: ImgProps, ctx: RenderingContext2D) {
 	let {
 		alpha,
 		src,
@@ -1183,7 +1276,7 @@ export interface SvgPathProps
 	d: string;
 }
 
-function SvgPath(props: SvgPathProps, ctx: CanvasRenderingContext2D) {
+function SvgPath(props: SvgPathProps, ctx: RenderingContext2D) {
 	const { d, ...pathProps } = props;
 	const svgPath = crcSvgPath(d);
 	return Path(
@@ -1210,11 +1303,10 @@ export interface GProps extends IntrinsicProps {
 	y?: number;
 	skewX?: number;
 	skewY?: number;
-	clip?: Path2D;
 	clipFillRule?: CanvasFillRule;
 }
 
-function G(props: GProps, ctx: CanvasRenderingContext2D) {
+function G(props: GProps, ctx: RenderingContext2D) {
 	let transform = ctx.getTransform();
 
 	const { scaleX = 1, scaleY = 1 } = props;
@@ -1247,11 +1339,6 @@ function G(props: GProps, ctx: CanvasRenderingContext2D) {
 	}
 
 	ctx.setTransform(transform);
-
-	const { clip } = props;
-	if (clip) {
-		ctx.clip(clip, props.clipFillRule);
-	}
 
 	return props.children;
 }
@@ -1289,7 +1376,7 @@ function checkPropsForEvents(props: CRCBasicMouseEvents) {
 	);
 }
 
-export function Text(props: TextProps, ctx: CanvasRenderingContext2D) {
+export function Text(props: TextProps, ctx: RenderingContext2D) {
 	const {
 		font = '13px sans-serif',
 		textBaseline = 'top',
@@ -1474,9 +1561,72 @@ function isTextTooWide(
  */
 export const g = defineComp(G);
 
+export interface LayerProps extends IntrinsicProps {
+	render: CompEl;
+}
+
+export function Layer(props: LayerProps, ctx: RenderingContext2D) {
+	if (_componentIsMounting) {
+		console.log('mounting layer');
+		const offscreenCanvas = new OffscreenCanvas(_canvas.width, _canvas.height);
+		mountCRC(offscreenCanvas, props.render, { parent: _canvas });
+		_componentRefs.refs[0] = offscreenCanvas;
+	}
+
+	const offscreenCanvas = _componentRefs.refs[0];
+	const layerCRC = crcInstances.get(offscreenCanvas);
+
+	console.log({
+		isMounting: _componentIsMounting,
+		sizeChanged:
+			offscreenCanvas.width !== _canvas.width ||
+			offscreenCanvas.height !== _canvas.height,
+		propsChanged: !shallowEquals(layerCRC.root.props, props.render.props),
+		oldProps: layerCRC.root.props,
+		newProps: props.render.props,
+	});
+	if (
+		_componentIsMounting ||
+		offscreenCanvas.width !== _canvas.width ||
+		offscreenCanvas.height !== _canvas.height ||
+		!shallowEquals(layerCRC.root.props, props.render.props)
+	) {
+		offscreenCanvas.width = _canvas.width;
+		offscreenCanvas.height = _canvas.height;
+		console.log('rendering');
+		executeRender(
+			offscreenCanvas,
+			_currentCRCInstance.renderTimestamp,
+			layerCRC.root,
+			false,
+		);
+	}
+
+	ctx.drawImage(offscreenCanvas, 0, 0);
+}
+
+export const layer = defineComp(Layer);
+
 ////////////////////////////////////////////////////////////////////////////////////////
 // Utility functions
 ////////////////////////////////////////////////////////////////////////////////////////
+
+function shallowEquals(obj1: any, obj2: any): boolean {
+	if (obj1 === obj2) {
+		return true;
+	}
+	const keys1 = Object.keys(obj1);
+	const keys2 = Object.keys(obj2);
+	if (keys1.length !== keys2.length) {
+		return false;
+	}
+	for (const key of keys1) {
+		if (obj1[key] !== obj2[key]) {
+			return false;
+		}
+	}
+	return true;
+}
 
 const recentCoords = new WeakMap<MouseEvent, readonly [number, number]>();
 
@@ -1505,12 +1655,12 @@ function shallowArrayEquals<T>(arr1: T[], arr2: T[]): boolean {
 	return true;
 }
 
-function get2dContext(canvas: HTMLCanvasElement) {
+function get2dContext(canvas: Canvas): RenderingContext2D {
 	const ctx = canvas.getContext('2d');
 	if (!ctx) {
 		throw new Error('Unable to get 2d context!');
 	}
-	return ctx;
+	return ctx as any;
 }
 
 function calculatePixelGridOffset(lineWidth: number) {
