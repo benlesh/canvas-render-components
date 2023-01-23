@@ -103,7 +103,17 @@ function MyLayer(
 
 const myLayer = defineComp(MyLayer);
 
-function LayerDemo({}: any, ctx: RenderingContext2D) {
+interface LayerDemoProps {
+	layerAWidth: number;
+	layerAHeight: number;
+	layerBWidth: number;
+	layerBHeight: number;
+}
+
+function LayerDemo(
+	{ layerAWidth, layerAHeight, layerBWidth, layerBHeight }: LayerDemoProps,
+	ctx: RenderingContext2D,
+) {
 	const [value, setValue] = crcState(0);
 
 	const renderCountRef = crcRef(0);
@@ -125,6 +135,8 @@ function LayerDemo({}: any, ctx: RenderingContext2D) {
 		}),
 		layer({
 			key: 'Layer A',
+			width: layerAWidth,
+			height: layerAHeight,
 			render: myLayer({
 				y: 30,
 				name: 'A',
@@ -133,6 +145,8 @@ function LayerDemo({}: any, ctx: RenderingContext2D) {
 		}),
 		layer({
 			key: 'Layer B',
+			width: layerBWidth,
+			height: layerBHeight,
 			render: myLayer({
 				y: 200,
 				name: 'B',
@@ -147,10 +161,8 @@ const layerDemo = defineComp(LayerDemo);
 const template = createTemplate(layerDemo);
 
 export const BasicProperties = template({
-	x: 100,
-	lineWidth: 1,
-	strokeStyle: 'blue',
-	cursor: 'pointer',
-	lineInteractionWidth: 20,
-	alignToPixelGrid: 'round',
+	layerAWidth: 500,
+	layerAHeight: 500,
+	layerBWidth: 500,
+	layerBHeight: 500,
 });

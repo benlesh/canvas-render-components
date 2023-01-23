@@ -1563,12 +1563,16 @@ export const g = defineComp(G);
 
 export interface LayerProps extends IntrinsicProps {
 	render: CompEl;
+	width?: number;
+	height?: number;
 }
 
 export function Layer(props: LayerProps, ctx: RenderingContext2D) {
+	const { width = _canvas.width, height = _canvas.height } = props;
+
 	if (_componentIsMounting) {
 		console.log('mounting layer');
-		const offscreenCanvas = new OffscreenCanvas(_canvas.width, _canvas.height);
+		const offscreenCanvas = new OffscreenCanvas(width, height);
 		mountCRC(offscreenCanvas, props.render, { parent: _canvas });
 		_componentRefs.refs[0] = offscreenCanvas;
 	}
@@ -1576,23 +1580,14 @@ export function Layer(props: LayerProps, ctx: RenderingContext2D) {
 	const offscreenCanvas = _componentRefs.refs[0];
 	const layerCRC = crcInstances.get(offscreenCanvas);
 
-	console.log({
-		isMounting: _componentIsMounting,
-		sizeChanged:
-			offscreenCanvas.width !== _canvas.width ||
-			offscreenCanvas.height !== _canvas.height,
-		propsChanged: !shallowEquals(layerCRC.root.props, props.render.props),
-		oldProps: layerCRC.root.props,
-		newProps: props.render.props,
-	});
 	if (
 		_componentIsMounting ||
-		offscreenCanvas.width !== _canvas.width ||
-		offscreenCanvas.height !== _canvas.height ||
+		offscreenCanvas.width !== width ||
+		offscreenCanvas.height !== height ||
 		!shallowEquals(layerCRC.root.props, props.render.props)
 	) {
-		offscreenCanvas.width = _canvas.width;
-		offscreenCanvas.height = _canvas.height;
+		offscreenCanvas.width = width;
+		offscreenCanvas.height = height;
 		console.log('rendering');
 		executeRender(
 			offscreenCanvas,
