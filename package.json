@@ -19,7 +19,7 @@
 		"build:types": "rm -rf dist/types && tsc",
 		"build": "npm run build:types && npm run build:esm && npm run build:cjs",
 		"prepublish": "",
-		"storybook": "export NODE_OPTIONS=--openssl-legacy-provider; start-storybook -p 6006",
+		"storybook": "start-storybook -p 6006",
 		"build-storybook": "build-storybook",
 		"test": "npx playwright test"
 	},

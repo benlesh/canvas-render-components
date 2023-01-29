@@ -99,8 +99,7 @@ const config: PlaywrightTestConfig = {
 
 	/* Run your local dev server before starting the tests */
 	webServer: {
-		command:
-			'export NODE_OPTIONS=--openssl-legacy-provider; npx start-storybook -p 6006',
+		command: 'npx start-storybook -p 6006',
 		// @ts-expect-error
 		waitFor: waitForStorybook,
 		url: 'http://localhost:6006',
