@@ -1061,7 +1061,7 @@ function Rect(props: RectProps, ctx: RenderingContext2D) {
 	}
 
 	const rectPath = new Path2D();
-	rectPath.rect(x, y, width, height);
+	rectPath.rect(x, y, width + 3, height);
 
 	Path(
 		{
