@@ -1,5 +1,7 @@
 # Canvas Render Components (alpha)
 
+# NO LONGER MAINTAINED.
+
 **Super duper alpha.. Use at your own risk. lol**
 
 The basic idea here is a "react-like" API that will create canvas "components" such that it handles:
